@@ -13,6 +13,7 @@ import io.deephaven.chunk.WritableLongChunk;
 import io.deephaven.chunk.sized.SizedLongChunk;
 import io.deephaven.configuration.Configuration;
 import io.deephaven.engine.page.PagingContextHolder;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.RowSequence;
 import io.deephaven.engine.rowset.RowSet;
 import io.deephaven.engine.rowset.RowSetBuilderSequential;
@@ -742,6 +743,18 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             }
             pageReader.openSparse(cursor, channelContext);
             SPARSE_OPENS.increment();
+            final RowSet rowsOfInterest = contextWrapper.rowsOfInterest;
+            final WritableRowSet hinted = rowsOfInterest == null ? null
+                    : hintedRows(rowsOfInterest, cached, decodeRanges, decodeCount, pageNum, pageFirstKey,
+                            maxDensity * pageRowCount(pageNum) - cachedRows);
+            if (hinted != null) {
+                fillHinted(contextWrapper, cursor, cached, hinted, decodeRanges, decodeCount, requestRanges,
+                        pageFirstKey, rowCount, pageNum, destination);
+                contextWrapper.sparseStore = this;
+                contextWrapper.sparsePageNum = pageNum;
+                SPARSE_FILLS.increment();
+                return true;
+            }
         }
         final Object values = toPage.convertResult(toPage.getSparseResult(cursor, decodeRanges, decodeCount));
         if (cached == null) {
@@ -756,6 +769,101 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         contextWrapper.sparsePageNum = pageNum;
         SPARSE_FILLS.increment();
         return true;
+    }
+
+    /**
+     * @param decodeRanges The page-relative ranges of the requested rows that {@code cached} lacks
+     * @param budget The number of rows that may be added to the page's cached sparse values
+     * @return The page-relative rows to decode on opening page {@code pageNum}: those in {@code decodeRanges}, plus the
+     *         rows of interest on the page that {@code cached} lacks; or {@code null} if they exceed {@code budget} or
+     *         add no rows
+     */
+    @Nullable
+    private WritableRowSet hintedRows(
+            @NotNull final RowSet rowsOfInterest,
+            @Nullable final SparsePage<ATTR> cached,
+            @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
+            final int decodeCount,
+            final int pageNum,
+            final long pageFirstKey,
+            final double budget) {
+        final RowSetBuilderSequential builder = RowSetFactory.builderSequential();
+        try (final RowSet onPage =
+                rowsOfInterest.subSetByKeyRange(pageFirstKey, pageFirstKey + pageRowCount(pageNum) - 1)) {
+            if (onPage.isEmpty() || onPage.size() > budget + decodeCount) {
+                return null;
+            }
+            onPage.forAllRowKeyRanges((first, last) -> builder.appendRange(first - pageFirstKey, last - pageFirstKey));
+        }
+        final WritableRowSet hinted = builder.build();
+        try (final RowSet requested = rangesToRowSet(decodeRanges)) {
+            hinted.insert(requested);
+        }
+        if (cached != null) {
+            hinted.remove(cached.rows);
+        }
+        if (hinted.size() > budget || hinted.size() == decodeCount) {
+            hinted.close();
+            return null;
+        }
+        return hinted;
+    }
+
+    private static WritableRowSet rangesToRowSet(@NotNull final LongChunk<OrderedRowKeyRanges> ranges) {
+        final RowSetBuilderSequential builder = RowSetFactory.builderSequential();
+        for (int ii = 0; ii < ranges.size(); ii += 2) {
+            builder.appendRange(ranges.get(ii), ranges.get(ii + 1));
+        }
+        return builder.build();
+    }
+
+    /**
+     * Decode {@code hinted} from the opened {@code cursor}, append the requested rows to {@code destination}, and add
+     * all of {@code hinted} to the page's cached sparse values.
+     *
+     * @param hinted Page-relative rows, a superset of those in {@code decodeRanges}; ownership passes to this method
+     * @param decodeRanges The page-relative ranges of the requested rows that {@code cached} lacks
+     * @param requestRanges The requested row key ranges; subtracting {@code pageFirstKey} makes them page-relative
+     */
+    private void fillHinted(
+            @NotNull final ChannelContextWrapper contextWrapper,
+            @NotNull final SparsePageCursor cursor,
+            @Nullable final SparsePage<ATTR> cached,
+            @NotNull final WritableRowSet hinted,
+            @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
+            final int decodeCount,
+            @NotNull final LongChunk<OrderedRowKeyRanges> requestRanges,
+            final long pageFirstKey,
+            final int rowCount,
+            final int pageNum,
+            @NotNull final WritableChunk<? super ATTR> destination) throws IOException {
+        final Object values;
+        final Object hintedValues;
+        try (final RowSet requested = rangesToRowSet(decodeRanges);
+                final RowSet requestedPositions = hinted.invert(requested);
+                final RowSet valuesPositions = RowSetFactory.flat(decodeCount)) {
+            final int hintedCount = hinted.intSize();
+            // Reuses the chunk decodeRanges views, which is no longer read.
+            final WritableLongChunk<OrderedRowKeyRanges> hintedRanges =
+                    contextWrapper.decodeRanges(2 * hintedCount);
+            hinted.fillRowKeyRangesChunk(hintedRanges);
+            hintedValues = toPage.convertResult(toPage.getSparseResult(cursor, hintedRanges, hintedCount));
+            values = Array.newInstance(hintedValues.getClass().getComponentType(), decodeCount);
+            copyPositions(hintedValues, requestedPositions, getChunkType().writableChunkWrap(values, 0, decodeCount),
+                    0, valuesPositions);
+        } catch (final IOException | RuntimeException e) {
+            hinted.close();
+            throw e;
+        }
+        if (cached == null) {
+            final int destinationOffset = destination.size();
+            destination.setSize(destinationOffset + rowCount);
+            destination.copyFromArray(values, 0, destinationOffset, rowCount);
+        } else {
+            fillMerged(cached, requestRanges, pageFirstKey, values, rowCount, destination);
+        }
+        // Published now, rather than kept pending, so that this context's later fills of hinted rows hit the cache.
+        publishSparse(pageNum, hinted, hintedValues);
     }
 
     /**
@@ -990,6 +1098,9 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     private static class ChannelContextWrapper extends PagingContextHolder {
         @NotNull
         private final SeekableChannelContext channelContext;
+        /** The {@link RowsOfInterest} of the shared context, if any. */
+        @Nullable
+        private final RowSet rowsOfInterest;
 
         @Nullable
         private SparsePageCursor sparseCursor;
@@ -1027,6 +1138,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
                 @NotNull final SeekableChannelContext channelContext) {
             super(chunkCapacity, sharedContext);
             this.channelContext = channelContext;
+            rowsOfInterest = RowsOfInterest.get(sharedContext);
         }
 
         @NotNull

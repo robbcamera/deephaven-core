@@ -12,6 +12,7 @@ import io.deephaven.chunk.sized.SizedBooleanChunk;
 import io.deephaven.chunk.sized.SizedChunk;
 import io.deephaven.chunk.sized.SizedLongChunk;
 import io.deephaven.chunk.util.hashing.ChunkEquals;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.*;
 import io.deephaven.engine.rowset.chunkattributes.RowKeys;
 import io.deephaven.engine.table.*;
@@ -1773,10 +1774,11 @@ public class AsOfJoinHelper {
     private static QueryTable makeResult(QueryTable leftTable, Table rightTable, RowRedirection rowRedirection,
             MatchPair[] columnsToAdd, boolean refreshing) {
         final Map<String, ColumnSource<?>> columnSources = new LinkedHashMap<>(leftTable.getColumnSourceMap());
+        final RowSet rowsOfInterest = RowsOfInterest.of(rightTable);
         Arrays.stream(columnsToAdd).forEach(mp -> {
             // note that we must always redirect the right-hand side, because unmatched rows will be redirected to null
-            final ColumnSource<?> rightSource =
-                    RedirectedColumnSource.alwaysRedirect(rowRedirection, rightTable.getColumnSource(mp.rightColumn()));
+            final ColumnSource<?> rightSource = RedirectedColumnSource.alwaysRedirect(rowRedirection,
+                    rightTable.getColumnSource(mp.rightColumn()), rowsOfInterest);
             if (refreshing) {
                 rightSource.startTrackingPrevValues();
             }

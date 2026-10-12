@@ -6,6 +6,7 @@ package io.deephaven.engine.table.impl;
 import io.deephaven.base.verify.Assert;
 import io.deephaven.configuration.Configuration;
 import io.deephaven.engine.exceptions.OutOfKeySpaceException;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.*;
 import io.deephaven.engine.rowset.RowSetFactory;
 import io.deephaven.engine.table.*;
@@ -248,7 +249,8 @@ public class CrossJoinHelper {
                 return makeResult(leftTable, rightTable, columnsToAdd, resultStateManager,
                         resultRowSet.toTracking(),
                         cs -> CrossJoinRightColumnSource.maybeWrap(
-                                resultStateManager, cs, rightTable.isRefreshing()));
+                                resultStateManager, cs, rightTable.isRefreshing(),
+                                RowsOfInterest.of(rightTable)));
             }
 
             if (!rightTable.isRefreshing()) {
@@ -261,7 +263,8 @@ public class CrossJoinHelper {
                 final TrackingWritableRowSet resultRowSet =
                         jsm.buildLeftTicking(leftTable, rightTable, bucketingContext.rightSources).toTracking();
                 final QueryTable resultTable = makeResult(leftTable, rightTable, columnsToAdd, jsm, resultRowSet,
-                        cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing()));
+                        cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing(),
+                                RowsOfInterest.of(rightTable)));
 
                 jsm.startTrackingPrevValues();
                 final ModifiedColumnSet.Transformer leftTransformer = leftTable.newModifiedColumnSetTransformer(
@@ -362,7 +365,8 @@ public class CrossJoinHelper {
             final TrackingWritableRowSet resultRowSet = jsm.build(leftTable, rightTable).toTracking();
 
             final QueryTable resultTable = makeResult(leftTable, rightTable, columnsToAdd, jsm, resultRowSet,
-                    cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing()));
+                    cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing(),
+                            RowsOfInterest.of(rightTable)));
 
             final ModifiedColumnSet.Transformer rightTransformer =
                     rightTable.newModifiedColumnSetTransformer(resultTable, columnsToAdd);
