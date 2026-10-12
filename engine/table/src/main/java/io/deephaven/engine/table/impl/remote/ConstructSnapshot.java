@@ -19,6 +19,7 @@ import io.deephaven.engine.table.impl.ForkJoinPoolOperationInitializer;
 import io.deephaven.engine.table.impl.sources.InMemoryColumnSource;
 import io.deephaven.engine.table.impl.sources.RedirectedColumnSource;
 import io.deephaven.engine.updategraph.*;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.*;
 import io.deephaven.engine.table.SharedContext;
 import io.deephaven.engine.table.impl.sources.ReinterpretUtils;
@@ -1381,6 +1382,7 @@ public class ConstructSnapshot {
         }
         boolean canParallelize = false;
         final int numNonEmptyColumns = nonEmptyColumnIndices.size();
+        final RowSet rowsOfInterest = RowsOfInterest.of(table);
         if (numNonEmptyColumns != 0) {
             final ExecutionContext executionContext = ExecutionContext.getContext();
             canParallelize = ENABLE_PARALLEL_SNAPSHOT &&
@@ -1390,13 +1392,13 @@ public class ConstructSnapshot {
                             !allColumnSourcesInMemory(nonEmptyColumnSources));
             if (canParallelize) {
                 if (!snapshotColumnsParallel(columnSourceNames, nonEmptyColumnIndices, nonEmptyColumnSources, usePrev,
-                        executionContext, snapshot)) {
+                        rowsOfInterest, executionContext, snapshot)) {
                     return false;
                 }
             } else {
                 // Snapshot all non-empty columns serially
                 snapshotColumnsSerial(columnSourceNames, nonEmptyColumnIndices, nonEmptyColumnSources, usePrev,
-                        snapshot);
+                        rowsOfInterest, snapshot);
             }
         }
         if (log.isDebugEnabled()) {
@@ -1451,6 +1453,7 @@ public class ConstructSnapshot {
             @NotNull final IntList columnIndices,
             @NotNull final List<ColumnSource<?>> columnSources,
             final boolean usePrev,
+            @Nullable final RowSet rowsOfInterest,
             final ExecutionContext executionContext,
             @NotNull final BarrageMessage snapshot) {
         final JobScheduler jobScheduler = new OperationInitializerJobScheduler();
@@ -1464,7 +1467,7 @@ public class ConstructSnapshot {
                         columnSourceNames,
                         new IntArrayList(new int[] {columnIndices.getInt(colRank)}),
                         columnSources.subList(colRank, colRank + 1),
-                        usePrev, snapshot),
+                        usePrev, rowsOfInterest, snapshot),
                 () -> waitForParallelSnapshot.complete(null),
                 () -> {
                 },
@@ -1577,6 +1580,7 @@ public class ConstructSnapshot {
             @NotNull final IntList columnIndices,
             @NotNull final List<ColumnSource<?>> columnSources,
             final boolean usePrev,
+            @Nullable final RowSet rowsOfInterest,
             @NotNull final BarrageMessage snapshot) {
         final RowSet rowSet = snapshot.rowsIncluded;
         final long numRows = rowSet.size();
@@ -1585,9 +1589,15 @@ public class ConstructSnapshot {
         final int numCols = columnIndices.size();
         final int maxChunkSize = (int) Math.min(numRows, SNAPSHOT_CHUNK_SIZE);
         final ColumnSource.FillContext[] fillContexts = new ColumnSource.FillContext[numCols];
-        try (final SharedContext sharedContext = numCols > 1 ? SharedContext.makeSharedContext() : null;
+        try (final SharedContext sharedContext =
+                numCols > 1 || rowsOfInterest != null ? SharedContext.makeSharedContext() : null;
                 final SafeCloseableArray<ColumnSource.FillContext> ignored = new SafeCloseableArray<>(fillContexts);
                 final RowSequence.Iterator it = rowSet.getRowSequenceIterator()) {
+            if (sharedContext != null) {
+                // The snapshot reads only rowSet, but later snapshots of the table, such as a scrolling viewport's,
+                // may read any of its rows.
+                RowsOfInterest.attach(sharedContext, rowsOfInterest);
+            }
             for (int colRank = 0; colRank < numCols; ++colRank) {
                 fillContexts[colRank] = columnSources.get(colRank).makeFillContext(maxChunkSize, sharedContext);
             }
