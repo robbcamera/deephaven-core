@@ -55,11 +55,8 @@ public class CrossJoinRightColumnSource<T> extends AbstractColumnSource<T> imple
     }
 
     /**
-     * Wrap the innerSource if it is not agnostic to redirection. Otherwise, return the innerSource.
+     * As {@link #maybeWrap(CrossJoinStateManager, ColumnSource, boolean)}, with a hint.
      *
-     * @param crossJoinManager The cross join manager to use
-     * @param innerSource The column source to redirect
-     * @param rightIsLive Whether the right side is live
      * @param rowsOfInterest Every row of {@code innerSource} the join may read, passed to it as {@link RowsOfInterest},
      *        or {@code null}; must not change
      */

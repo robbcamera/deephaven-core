@@ -60,10 +60,8 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     }
 
     /**
-     * Redirect the innerSource if it is not agnostic to redirection. Otherwise, return the innerSource.
+     * As {@link #maybeRedirect(RowRedirection, ColumnSource)}, with a hint.
      *
-     * @param rowRedirection The row redirection to use
-     * @param innerSource The column source to redirect
      * @param rowsOfInterest Every row of {@code innerSource} that {@code rowRedirection} may map to, passed to it as
      *        {@link RowsOfInterest}, or {@code null}; must not change
      */
@@ -94,8 +92,6 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     /**
      * As {@link #alwaysRedirect(RowRedirection, ColumnSource)}, with a hint.
      *
-     * @param rowRedirection The row redirection to use
-     * @param innerSource The column source to redirect
      * @param rowsOfInterest Every row of {@code innerSource} that {@code rowRedirection} may map to, passed to it as
      *        {@link RowsOfInterest}, or {@code null}; must not change
      */
