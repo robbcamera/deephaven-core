@@ -82,8 +82,8 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
 
     /**
      * Set the process-wide sparse read density cutoff, which starts as the
-     * {@code ColumnChunkPageStore.sparseReadMaxDensity} configuration property; {@code 0} disables sparse reads.
-     * Columns read while sparse reads are disabled are given no {@link RowsOfInterest} hints.
+     * {@code ColumnChunkPageStore.sparseReadMaxDensity} configuration property; {@code 0} disables sparse reads. Column
+     * sources made while sparse reads are disabled are never given {@link RowsOfInterest} hints.
      *
      * @return The previous setting
      */
@@ -274,11 +274,6 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     @Override
     public long mask() {
         return mask;
-    }
-
-    @Override
-    public boolean readsRowsOfInterest() {
-        return sparseReadsEnabled() && sparseSupport != SparseSupport.UNSUPPORTED;
     }
 
     @Override
@@ -1116,7 +1111,6 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     private static class ChannelContextWrapper extends PagingContextHolder {
         @NotNull
         private final SeekableChannelContext channelContext;
-        /** The hint of the shared context, if any; see {@link #rowsOfInterest()}. */
         @Nullable
         private final RowsOfInterest hint;
         @Nullable

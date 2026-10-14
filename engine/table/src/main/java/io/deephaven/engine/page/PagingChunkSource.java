@@ -49,8 +49,7 @@ public interface PagingChunkSource<ATTR extends Any> extends DefaultChunkSource<
     long mask();
 
     /**
-     * @return Whether this source may read a {@link RowsOfInterest} hint from the shared contexts it is given. Hints
-     *         are made only for sources that would read them.
+     * @return Whether this source may read a {@link RowsOfInterest} hint from the shared contexts it is given
      */
     default boolean readsRowsOfInterest() {
         return false;
