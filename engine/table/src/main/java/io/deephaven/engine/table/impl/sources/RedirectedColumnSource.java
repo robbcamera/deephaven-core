@@ -31,6 +31,7 @@ import io.deephaven.engine.rowset.chunkattributes.RowKeys;
 import io.deephaven.chunk.attributes.Values;
 
 import java.time.Instant;
+import java.util.function.Supplier;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -73,7 +74,7 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
         if (innerSource instanceof RowKeyAgnosticChunkSource) {
             return innerSource;
         }
-        return new RedirectedColumnSource<>(rowRedirection, innerSource, rowsOfInterest);
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, hint(rowsOfInterest));
     }
 
     /**
@@ -87,7 +88,7 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     public static <T> ColumnSource<T> alwaysRedirect(
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource) {
-        return alwaysRedirect(rowRedirection, innerSource, null);
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, null);
     }
 
     /**
@@ -102,14 +103,33 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource,
             @Nullable final RowSet rowsOfInterest) {
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, hint(rowsOfInterest));
+    }
+
+    /**
+     * As {@link #alwaysRedirect(RowRedirection, ColumnSource, RowSet)}, with a hint computed when {@code innerSource}
+     * first reads it.
+     *
+     * @param rowsOfInterest Supplies the hint, or {@code null}; see
+     *        {@link RowsOfInterest#attach(SharedContext, Supplier)}
+     */
+    public static <T> ColumnSource<T> alwaysRedirect(
+            @NotNull final RowRedirection rowRedirection,
+            @NotNull final ColumnSource<T> innerSource,
+            @Nullable final Supplier<RowSet> rowsOfInterest) {
         return new RedirectedColumnSource<>(rowRedirection, innerSource, rowsOfInterest);
+    }
+
+    @Nullable
+    private static Supplier<RowSet> hint(@Nullable final RowSet rowsOfInterest) {
+        return rowsOfInterest == null ? null : () -> rowsOfInterest;
     }
 
     protected final RowRedirection rowRedirection;
     protected final ColumnSource<T> innerSource;
     private final boolean ascendingMapping;
     @Nullable
-    private final RowSet rowsOfInterest;
+    private final Supplier<RowSet> rowsOfInterest;
 
     protected RedirectedColumnSource(
             @NotNull final RowRedirection rowRedirection,
@@ -120,7 +140,7 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     private RedirectedColumnSource(
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource,
-            @Nullable final RowSet rowsOfInterest) {
+            @Nullable final Supplier<RowSet> rowsOfInterest) {
         super(innerSource.getType());
         this.rowRedirection = rowRedirection;
         this.innerSource = innerSource;

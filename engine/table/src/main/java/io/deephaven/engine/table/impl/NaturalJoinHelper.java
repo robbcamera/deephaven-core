@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static io.deephaven.engine.table.impl.JoinControl.BuildParameters.From.*;
 
@@ -525,11 +526,12 @@ class NaturalJoinHelper {
             @NotNull final RowRedirection rowRedirection,
             final boolean rightRefreshingColumns) {
         final Map<String, ColumnSource<?>> columnSourceMap = new LinkedHashMap<>(leftTable.getColumnSourceMap());
-        final RowSet rowsOfInterest = RowsOfInterest.of(rightTable);
+        final Supplier<RowSet> rowsOfInterest = RedirectedRowsOfInterest.of(leftTable, rightTable, rowRedirection);
         for (MatchPair mp : columnsToAdd) {
+            final ColumnSource<?> rightSource = rightTable.getColumnSource(mp.rightColumn());
             // note that we must always redirect the right-hand side, because unmatched rows will be redirected to null
             final ColumnSource<?> redirectedColumnSource = RedirectedColumnSource.alwaysRedirect(rowRedirection,
-                    rightTable.getColumnSource(mp.rightColumn()), rowsOfInterest);
+                    rightSource, RowsOfInterest.readBy(rightSource) ? rowsOfInterest : null);
             if (rightRefreshingColumns) {
                 redirectedColumnSource.startTrackingPrevValues();
             }

@@ -32,6 +32,7 @@ abstract class RegionedColumnSourceArray<DATA_TYPE, ATTR extends Values, REGION_
     private final MakeDeferred<ATTR, REGION_TYPE> makeDeferred;
     private volatile int regionCount = 0;
     private volatile REGION_TYPE[] regions;
+    private volatile boolean readsRowsOfInterest;
 
     @SuppressWarnings("rawtypes")
     private static final ColumnRegion[] EMPTY = new ColumnRegion[0];
@@ -93,7 +94,15 @@ abstract class RegionedColumnSourceArray<DATA_TYPE, ATTR extends Values, REGION_
         final int regionIndex = regionCount;
         regions[regionIndex] = makeDeferred.make(PARAMETERS.regionMask,
                 () -> updateRegion(regionIndex, makeRegion(columnDefinition, columnLocation, regionIndex)));
+        if (!readsRowsOfInterest && columnLocation.readsRowsOfInterest(columnDefinition)) {
+            readsRowsOfInterest = true;
+        }
         return regionCount++;
+    }
+
+    @Override
+    public boolean readsRowsOfInterest() {
+        return readsRowsOfInterest;
     }
 
     /**

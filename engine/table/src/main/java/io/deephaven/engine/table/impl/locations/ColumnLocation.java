@@ -41,6 +41,15 @@ public interface ColumnLocation extends StringUtils.StringKeyedObject, NamedImpl
     boolean exists();
 
     /**
+     * @param columnDefinition The definition of the column the region is made for
+     * @return Whether regions made from this location may read a {@link io.deephaven.engine.page.RowsOfInterest} hint;
+     *         asked when the location's region is added to a column source, so must not read or resolve the column
+     */
+    default boolean readsRowsOfInterest(@NotNull final ColumnDefinition<?> columnDefinition) {
+        return false;
+    }
+
+    /**
      * Get this column location cast to the specified type
      *
      * @return {@code this}, with the appropriate cast applied

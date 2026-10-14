@@ -151,6 +151,20 @@ final class ParquetColumnLocation<ATTR extends Values> extends AbstractColumnLoc
         return exists;
     }
 
+    /**
+     * @return Whether sparse reads are enabled and the column is not an array or vector, which are repeated and so
+     *         cannot be read sparsely; see {@link ColumnChunkPageStore#setSparseReadMaxDensity}. A nested optional
+     *         column cannot be either, but telling requires resolving the column, which may fail and must wait for a
+     *         read.
+     */
+    @Override
+    public boolean readsRowsOfInterest(@NotNull final ColumnDefinition<?> columnDefinition) {
+        final Class<?> dataType = columnDefinition.getDataType();
+        return ColumnChunkPageStore.sparseReadsEnabled()
+                && !dataType.isArray()
+                && !Vector.class.isAssignableFrom(dataType);
+    }
+
     private ParquetTableLocation tl() {
         return (ParquetTableLocation) getTableLocation();
     }
