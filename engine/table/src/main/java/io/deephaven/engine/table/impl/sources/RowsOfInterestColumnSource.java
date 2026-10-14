@@ -3,7 +3,6 @@
 //
 package io.deephaven.engine.table.impl.sources;
 
-import io.deephaven.engine.page.PagingChunkSource;
 import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.RowSet;
 import io.deephaven.engine.table.ColumnSource;
@@ -18,13 +17,13 @@ import org.jetbrains.annotations.NotNull;
 public final class RowsOfInterestColumnSource<T> extends DelegatingColumnSource<T, T> {
 
     /**
-     * @return {@code source}, wrapped to hint the rows of {@code table} if it is static and {@code source} pages
+     * @return {@code source}, wrapped to hint the rows of {@code table} if it is static and {@code source} reads hints
      */
     public static <T> ColumnSource<T> maybeWrap(@NotNull final ColumnSource<T> source, @NotNull final Table table) {
-        final RowSet rowsOfInterest = RowsOfInterest.of(table);
         // Only paging sources read the hint, and they keep nothing else in their shared context: another source may
         // cache per-chunk state there, which a context made here would never reset.
-        if (rowsOfInterest == null || !(source instanceof PagingChunkSource)) {
+        final RowSet rowsOfInterest = RowsOfInterest.of(table, source);
+        if (rowsOfInterest == null) {
             return source;
         }
         return new RowsOfInterestColumnSource<>(source, rowsOfInterest);
@@ -49,7 +48,8 @@ public final class RowsOfInterestColumnSource<T> extends DelegatingColumnSource<
 
     /**
      * @return A shared context holding only the hint. The caller's is not used: skipping a shared context is always
-     *         safe, and it may already hold another hint.
+     *         safe, and it may already hold another hint. It is never closed: the delegate keeps nothing in it, and the
+     *         hint holds no resources.
      */
     private SharedContext hint() {
         final SharedContext hint = SharedContext.makeSharedContext();

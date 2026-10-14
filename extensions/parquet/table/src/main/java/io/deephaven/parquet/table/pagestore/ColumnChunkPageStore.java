@@ -83,6 +83,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     /**
      * Set the process-wide sparse read density cutoff, which starts as the
      * {@code ColumnChunkPageStore.sparseReadMaxDensity} configuration property; {@code 0} disables sparse reads.
+     * Columns read while sparse reads are disabled are given no {@link RowsOfInterest} hints.
      *
      * @return The previous setting
      */
@@ -90,6 +91,13 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         final double old = sparseReadMaxDensity;
         sparseReadMaxDensity = maxDensity;
         return old;
+    }
+
+    /**
+     * @return Whether sparse reads are enabled; see {@link #setSparseReadMaxDensity}
+     */
+    public static boolean sparseReadsEnabled() {
+        return sparseReadMaxDensity > 0;
     }
 
     /**
@@ -266,6 +274,11 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     @Override
     public long mask() {
         return mask;
+    }
+
+    @Override
+    public boolean readsRowsOfInterest() {
+        return sparseReadsEnabled() && sparseSupport != SparseSupport.UNSUPPORTED;
     }
 
     @Override
@@ -733,27 +746,36 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         // Until this fill completes, the cursor's position is unknown.
         contextWrapper.sparseStore = null;
         if (!onCursorPage) {
-            if (state.misses.incrementAndGet() > sparseMissesBeforeFullCaching) {
-                // Other passes keep reading this page; cache it for them.
-                return false;
-            }
-            final ColumnPageReader pageReader = getPageReader(channelContext, pageNum);
-            if (!supportsSparse(pageReader)) {
-                return false;
-            }
-            pageReader.openSparse(cursor, channelContext);
-            SPARSE_OPENS.increment();
-            final RowSet rowsOfInterest = contextWrapper.rowsOfInterest;
-            final WritableRowSet hinted = rowsOfInterest == null ? null
-                    : hintedRows(rowsOfInterest, cached, decodeRanges, decodeCount, pageNum, pageFirstKey,
-                            maxDensity * pageRowCount(pageNum) - cachedRows);
-            if (hinted != null) {
-                fillHinted(contextWrapper, cursor, cached, hinted, decodeRanges, decodeCount, requestRanges,
-                        pageFirstKey, rowCount, pageNum, destination);
-                contextWrapper.sparseStore = this;
-                contextWrapper.sparsePageNum = pageNum;
-                SPARSE_FILLS.increment();
-                return true;
+            // Opening the page reads the hint, which may compute it.
+            final RowSet rowsOfInterest = contextWrapper.rowsOfInterest();
+            final long pageRowCount = pageRowCount(pageNum);
+            try (final RowSet hintOnPage = rowsOfInterest == null ? null
+                    : rowsOfInterest.subSetByKeyRange(pageFirstKey, pageFirstKey + pageRowCount - 1)) {
+                if (hintOnPage != null && hintOnPage.size() > maxDensity * pageRowCount) {
+                    // The consumer may read most of the page; cache it whole, as a read without sparse support would.
+                    return false;
+                }
+                if (state.misses.incrementAndGet() > sparseMissesBeforeFullCaching) {
+                    // Other passes keep reading this page; cache it for them.
+                    return false;
+                }
+                final ColumnPageReader pageReader = getPageReader(channelContext, pageNum);
+                if (!supportsSparse(pageReader)) {
+                    return false;
+                }
+                pageReader.openSparse(cursor, channelContext);
+                SPARSE_OPENS.increment();
+                final WritableRowSet hinted = hintOnPage == null ? null
+                        : hintedRows(hintOnPage, cached, decodeRanges, decodeCount, pageFirstKey,
+                                maxDensity * pageRowCount - cachedRows);
+                if (hinted != null) {
+                    fillHinted(contextWrapper, cursor, cached, hinted, decodeRanges, decodeCount, requestRanges,
+                            pageFirstKey, rowCount, pageNum, destination);
+                    contextWrapper.sparseStore = this;
+                    contextWrapper.sparsePageNum = pageNum;
+                    SPARSE_FILLS.increment();
+                    return true;
+                }
             }
         }
         final Object values = toPage.convertResult(toPage.getSparseResult(cursor, decodeRanges, decodeCount));
@@ -772,29 +794,26 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     }
 
     /**
+     * @param hintOnPage The rows of interest on the page, as row keys
      * @param decodeRanges The page-relative ranges of the requested rows that {@code cached} lacks
      * @param budget The number of rows that may be added to the page's cached sparse values
-     * @return The page-relative rows to decode on opening page {@code pageNum}: those in {@code decodeRanges}, plus the
-     *         rows of interest on the page that {@code cached} lacks; or {@code null} if they exceed {@code budget} or
-     *         add no rows
+     * @return The page-relative rows to decode on opening the page: those in {@code decodeRanges}, plus those of
+     *         {@code hintOnPage} that {@code cached} lacks; or {@code null} if they exceed {@code budget} or add no
+     *         rows
      */
     @Nullable
-    private WritableRowSet hintedRows(
-            @NotNull final RowSet rowsOfInterest,
-            @Nullable final SparsePage<ATTR> cached,
+    private static WritableRowSet hintedRows(
+            @NotNull final RowSet hintOnPage,
+            @Nullable final SparsePage<?> cached,
             @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
             final int decodeCount,
-            final int pageNum,
             final long pageFirstKey,
             final double budget) {
-        final RowSetBuilderSequential builder = RowSetFactory.builderSequential();
-        try (final RowSet onPage =
-                rowsOfInterest.subSetByKeyRange(pageFirstKey, pageFirstKey + pageRowCount(pageNum) - 1)) {
-            if (onPage.isEmpty() || onPage.size() > budget + decodeCount) {
-                return null;
-            }
-            onPage.forAllRowKeyRanges((first, last) -> builder.appendRange(first - pageFirstKey, last - pageFirstKey));
+        if (hintOnPage.isEmpty() || hintOnPage.size() > budget + decodeCount) {
+            return null;
         }
+        final RowSetBuilderSequential builder = RowSetFactory.builderSequential();
+        hintOnPage.forAllRowKeyRanges((first, last) -> builder.appendRange(first - pageFirstKey, last - pageFirstKey));
         final WritableRowSet hinted = builder.build();
         try (final RowSet requested = rangesToRowSet(decodeRanges)) {
             hinted.insert(requested);
@@ -1098,9 +1117,11 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     private static class ChannelContextWrapper extends PagingContextHolder {
         @NotNull
         private final SeekableChannelContext channelContext;
-        /** The {@link RowsOfInterest} of the shared context, if any. */
+        /** The hint of the shared context, if any; see {@link #rowsOfInterest()}. */
         @Nullable
-        private final RowSet rowsOfInterest;
+        private final RowsOfInterest hint;
+        @Nullable
+        private RowSet rowsOfInterest;
 
         @Nullable
         private SparsePageCursor sparseCursor;
@@ -1138,12 +1159,23 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
                 @NotNull final SeekableChannelContext channelContext) {
             super(chunkCapacity, sharedContext);
             this.channelContext = channelContext;
-            rowsOfInterest = RowsOfInterest.get(sharedContext);
+            hint = RowsOfInterest.get(sharedContext);
         }
 
         @NotNull
         SeekableChannelContext getChannelContext() {
             return channelContext;
+        }
+
+        /**
+         * @return The {@link RowsOfInterest} of the shared context, if any; may compute them, so call only to use them
+         */
+        @Nullable
+        RowSet rowsOfInterest() {
+            if (rowsOfInterest == null && hint != null) {
+                rowsOfInterest = hint.rows();
+            }
+            return rowsOfInterest;
         }
 
         @NotNull

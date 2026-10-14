@@ -250,7 +250,7 @@ public class CrossJoinHelper {
                         resultRowSet.toTracking(),
                         cs -> CrossJoinRightColumnSource.maybeWrap(
                                 resultStateManager, cs, rightTable.isRefreshing(),
-                                RowsOfInterest.of(rightTable)));
+                                RowsOfInterest.of(rightTable, cs)));
             }
 
             if (!rightTable.isRefreshing()) {
@@ -264,7 +264,7 @@ public class CrossJoinHelper {
                         jsm.buildLeftTicking(leftTable, rightTable, bucketingContext.rightSources).toTracking();
                 final QueryTable resultTable = makeResult(leftTable, rightTable, columnsToAdd, jsm, resultRowSet,
                         cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing(),
-                                RowsOfInterest.of(rightTable)));
+                                RowsOfInterest.of(rightTable, cs)));
 
                 jsm.startTrackingPrevValues();
                 final ModifiedColumnSet.Transformer leftTransformer = leftTable.newModifiedColumnSetTransformer(
@@ -366,7 +366,7 @@ public class CrossJoinHelper {
 
             final QueryTable resultTable = makeResult(leftTable, rightTable, columnsToAdd, jsm, resultRowSet,
                     cs -> CrossJoinRightColumnSource.maybeWrap(jsm, cs, rightTable.isRefreshing(),
-                            RowsOfInterest.of(rightTable)));
+                            RowsOfInterest.of(rightTable, cs)));
 
             final ModifiedColumnSet.Transformer rightTransformer =
                     rightTable.newModifiedColumnSetTransformer(resultTable, columnsToAdd);

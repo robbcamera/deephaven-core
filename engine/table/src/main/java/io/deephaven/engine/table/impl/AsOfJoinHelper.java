@@ -1774,11 +1774,12 @@ public class AsOfJoinHelper {
     private static QueryTable makeResult(QueryTable leftTable, Table rightTable, RowRedirection rowRedirection,
             MatchPair[] columnsToAdd, boolean refreshing) {
         final Map<String, ColumnSource<?>> columnSources = new LinkedHashMap<>(leftTable.getColumnSourceMap());
-        final RowSet rowsOfInterest = RowsOfInterest.of(rightTable);
+        final Supplier<RowSet> rowsOfInterest = RedirectedRowsOfInterest.of(leftTable, rightTable, rowRedirection);
         Arrays.stream(columnsToAdd).forEach(mp -> {
+            final ColumnSource<?> innerSource = rightTable.getColumnSource(mp.rightColumn());
             // note that we must always redirect the right-hand side, because unmatched rows will be redirected to null
-            final ColumnSource<?> rightSource = RedirectedColumnSource.alwaysRedirect(rowRedirection,
-                    rightTable.getColumnSource(mp.rightColumn()), rowsOfInterest);
+            final ColumnSource<?> rightSource = RedirectedColumnSource.alwaysRedirect(rowRedirection, innerSource,
+                    RowsOfInterest.readBy(innerSource) ? rowsOfInterest : null);
             if (refreshing) {
                 rightSource.startTrackingPrevValues();
             }

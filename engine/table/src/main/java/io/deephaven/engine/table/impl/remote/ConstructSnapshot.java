@@ -1380,7 +1380,9 @@ public class ConstructSnapshot {
         }
         boolean canParallelize = false;
         final int numNonEmptyColumns = nonEmptyColumnIndices.size();
-        final RowSet rowsOfInterest = RowsOfInterest.of(table);
+        final RowSet rowsOfInterest = nonEmptyColumnSources.stream().anyMatch(RowsOfInterest::readBy)
+                ? RowsOfInterest.of(table)
+                : null;
         if (numNonEmptyColumns != 0) {
             final ExecutionContext executionContext = ExecutionContext.getContext();
             canParallelize = ENABLE_PARALLEL_SNAPSHOT &&

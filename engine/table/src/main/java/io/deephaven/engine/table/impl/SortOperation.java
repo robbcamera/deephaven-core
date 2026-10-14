@@ -386,7 +386,8 @@ public class SortOperation implements QueryTable.MemoizableOperation<QueryTable>
         for (Map.Entry<String, ColumnSource<?>> stringColumnSourceEntry : parent.getColumnSourceMap().entrySet()) {
             final ColumnSource<?> innerSource = stringColumnSourceEntry.getValue();
             final ColumnSource<?> redirectedSource =
-                    RedirectedColumnSource.maybeRedirect(sortMapping, innerSource, rowsOfInterest);
+                    RedirectedColumnSource.maybeRedirect(sortMapping, innerSource,
+                            RowsOfInterest.readBy(innerSource) ? rowsOfInterest : null);
             resultMap.put(stringColumnSourceEntry.getKey(), redirectedSource);
             if (redirectedSource != innerSource) {
                 sortMappingColumnName = stringColumnSourceEntry.getKey();

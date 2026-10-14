@@ -4,27 +4,39 @@
 package io.deephaven.engine.page;
 
 import io.deephaven.engine.rowset.RowSet;
+import io.deephaven.engine.table.ColumnSource;
 import io.deephaven.engine.table.ResettableContext;
 import io.deephaven.engine.table.SharedContext;
 import io.deephaven.engine.table.Table;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.function.Supplier;
+
 /**
  * A hint, carried by a {@link SharedContext}, of every row key a consumer may read from the sources it passes that
- * context to. A paging source may decode them all on its first read of a page, rather than only the rows requested. The
- * hint is advisory: a superset is safe, and a row outside it is read as usual.
+ * context to. A paging source may decode them all on its first read of a page, rather than only the rows requested, or
+ * cache the page whole if they are most of it. The hint is advisory: a superset is safe, and a row outside it is read
+ * as usual.
  */
 public final class RowsOfInterest implements ResettableContext {
 
     private static final SharedContext.Key<RowsOfInterest> KEY = new SharedContext.Key<>() {};
-    private static final RowsOfInterest NONE = new RowsOfInterest(null);
-
+    /**
+     * Set by the first {@link #attach}, which may follow a {@link #get}: {@link SharedContext} has no lookup that does
+     * not insert.
+     */
     @Nullable
-    private final RowSet rows;
+    private Supplier<RowSet> rows;
 
-    private RowsOfInterest(@Nullable final RowSet rows) {
-        this.rows = rows;
+    private RowsOfInterest() {}
+
+    /**
+     * @return Whether {@code source} may read a hint from the shared contexts it is given; see
+     *         {@link PagingChunkSource#readsRowsOfInterest()}
+     */
+    public static boolean readBy(@NotNull final ColumnSource<?> source) {
+        return source instanceof PagingChunkSource && ((PagingChunkSource<?>) source).readsRowsOfInterest();
     }
 
     /**
@@ -37,6 +49,15 @@ public final class RowsOfInterest implements ResettableContext {
     }
 
     /**
+     * @return As {@link #of(Table)}, for reads of {@code source}, one of {@code table}'s column sources; or
+     *         {@code null} if {@code source} would not read it
+     */
+    @Nullable
+    public static RowSet of(@NotNull final Table table, @NotNull final ColumnSource<?> source) {
+        return readBy(source) ? of(table) : null;
+    }
+
+    /**
      * Attach {@code rows} to {@code sharedContext}, unless it already carries a hint.
      *
      * @param rows The row keys of interest, or {@code null} for none; not owned, and must not change while
@@ -44,16 +65,41 @@ public final class RowsOfInterest implements ResettableContext {
      */
     public static void attach(@NotNull final SharedContext sharedContext, @Nullable final RowSet rows) {
         if (rows != null) {
-            sharedContext.getOrCreate(KEY, () -> new RowsOfInterest(rows));
+            attach(sharedContext, () -> rows);
         }
     }
 
     /**
-     * @return The row keys of interest attached to {@code sharedContext}, or {@code null} if none
+     * As {@link #attach(SharedContext, RowSet)}, with the rows computed when a source first reads them.
+     *
+     * @param rows Supplies the row keys of interest, or {@code null} for none; called on each read of the hint, so
+     *        should be cheap after the first call
+     */
+    public static void attach(@NotNull final SharedContext sharedContext, @Nullable final Supplier<RowSet> rows) {
+        if (rows != null) {
+            final RowsOfInterest hint = sharedContext.getOrCreate(KEY, RowsOfInterest::new);
+            if (hint.rows == null) {
+                hint.rows = rows;
+            }
+        }
+    }
+
+    /**
+     * @return The hint of {@code sharedContext}, or {@code null} if it is {@code null}; rows attached later are seen by
+     *         {@link #rows()}
      */
     @Nullable
-    public static RowSet get(@Nullable final SharedContext sharedContext) {
-        return sharedContext == null ? null : sharedContext.getOrCreate(KEY, () -> NONE).rows;
+    public static RowsOfInterest get(@Nullable final SharedContext sharedContext) {
+        return sharedContext == null ? null : sharedContext.getOrCreate(KEY, RowsOfInterest::new);
+    }
+
+    /**
+     * @return The row keys of interest, or {@code null} if none are attached yet; may compute them, so call only to use
+     *         them
+     */
+    @Nullable
+    public RowSet rows() {
+        return rows == null ? null : rows.get();
     }
 
     @Override
