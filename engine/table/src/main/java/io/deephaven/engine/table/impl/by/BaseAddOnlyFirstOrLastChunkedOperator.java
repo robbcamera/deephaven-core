@@ -3,6 +3,7 @@
 //
 package io.deephaven.engine.table.impl.by;
 
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.table.Table;
 import io.deephaven.engine.table.impl.MatchPair;
 import io.deephaven.engine.table.ColumnSource;
@@ -35,8 +36,11 @@ abstract class BaseAddOnlyFirstOrLastChunkedOperator
 
         this.resultColumns = new LinkedHashMap<>(resultPairs.length);
         for (final MatchPair mp : resultPairs) {
+            final ColumnSource<?> source = originalTable.getColumnSource(mp.rightColumn());
+            // A static table's first or last rows are scattered over it: hint the table's rows, so each page is read
+            // once, whole.
             resultColumns.put(mp.leftColumn(), RedirectedColumnSource.maybeRedirect(
-                    rowRedirection, originalTable.getColumnSource(mp.rightColumn())));
+                    rowRedirection, source, RowsOfInterest.of(originalTable, source)));
         }
         if (exposeRedirectionAs != null) {
             resultColumns.put(exposeRedirectionAs, redirections);
