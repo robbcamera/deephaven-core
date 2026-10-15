@@ -743,9 +743,14 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         // Until this fill completes, the cursor's position is unknown.
         contextWrapper.sparseStore = null;
         if (!onCursorPage) {
+            final long pageRowCount = pageRowCount(pageNum);
+            if (contextWrapper.estimateRowsOfInterest(pageFirstKey, pageFirstKey + pageRowCount - 1) > maxDensity
+                    * pageRowCount) {
+                // The consumer may read most of the page; cache it whole, without computing the hint.
+                return false;
+            }
             // Opening the page reads the hint, which may compute it.
             final RowSet rowsOfInterest = contextWrapper.rowsOfInterest();
-            final long pageRowCount = pageRowCount(pageNum);
             try (final RowSet hintOnPage = rowsOfInterest == null ? null
                     : rowsOfInterest.subSetByKeyRange(pageFirstKey, pageFirstKey + pageRowCount - 1)) {
                 if (hintOnPage != null && hintOnPage.size() > maxDensity * pageRowCount) {
@@ -1169,6 +1174,14 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
                 rowsOfInterest = hint.rows();
             }
             return rowsOfInterest;
+        }
+
+        /**
+         * @return An estimate of the {@link #rowsOfInterest()} in {@code [firstKey, lastKey]} made without computing
+         *         them, or {@code -1} if there is none
+         */
+        double estimateRowsOfInterest(final long firstKey, final long lastKey) {
+            return rowsOfInterest == null && hint != null ? hint.estimateRowsIn(firstKey, lastKey) : -1;
         }
 
         @NotNull

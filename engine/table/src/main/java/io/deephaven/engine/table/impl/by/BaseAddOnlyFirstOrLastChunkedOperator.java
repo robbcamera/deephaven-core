@@ -37,8 +37,9 @@ abstract class BaseAddOnlyFirstOrLastChunkedOperator
         this.resultColumns = new LinkedHashMap<>(resultPairs.length);
         for (final MatchPair mp : resultPairs) {
             final ColumnSource<?> source = originalTable.getColumnSource(mp.rightColumn());
-            // A static table's first or last rows are scattered over it: hint the table's rows, so each page is read
-            // once, whole.
+            // A static table's first or last rows are scattered over it. Hinting all its rows decodes each page read
+            // once, whole, at no compute cost; hinting only the picked rows would skip more, but cost more to compute
+            // than it saved.
             resultColumns.put(mp.leftColumn(), RedirectedColumnSource.maybeRedirect(
                     rowRedirection, source, RowsOfInterest.of(originalTable, source)));
         }

@@ -1087,6 +1087,56 @@ public class SparsePageReadTest {
     }
 
     /**
+     * A lazy hint estimated to cover most of a page caches the page whole without being computed; one estimated sparse
+     * is computed as usual.
+     */
+    @Test
+    public void testDenseEstimateSkipsHint() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        final Table sorted = ParquetTools.readTable(path).updateView("H_ = (ii * 2654435761L) % 1000003L").sort("H_");
+        final RowRedirection redirection = SortOperation.getRowRedirection(sorted);
+        final ColumnSource<?> expectedSource =
+                RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource("L"));
+        final AtomicInteger calls = new AtomicInteger();
+        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+                final RowSet requested = sorted.getRowSet().subSetByPositionRange(0, 50);
+                final RowSet none = RowSetFactory.empty()) {
+            // Advisory: an empty hint leaves the sparse reads to the requests.
+            final Supplier<RowSet> rows = () -> {
+                calls.incrementAndGet();
+                return none;
+            };
+            final ColumnSource<?> denseHinted = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), estimatedHint(rows, 1));
+            assertEquals("dense estimate: sparse fills", 0, fillSteps(expectedSource, denseHinted, requested, 50)[0]);
+            assertEquals("dense estimate", 0, calls.get());
+            final ColumnSource<?> sparseHinted = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), estimatedHint(rows, 0));
+            assertTrue("should read sparsely", fillSteps(expectedSource, sparseHinted, requested, 50)[0] > 0);
+            assertEquals("sparse estimate", 1, calls.get());
+        }
+    }
+
+    /**
+     * @return A hint of {@code rows}, estimated to cover {@code density} of any range
+     */
+    private static RowsOfInterest.Estimated estimatedHint(final Supplier<RowSet> rows, final double density) {
+        return new RowsOfInterest.Estimated() {
+            @Override
+            public RowSet get() {
+                return rows.get();
+            }
+
+            @Override
+            public double estimateRowsIn(final long firstKey, final long lastKey) {
+                return density * (lastKey - firstKey + 1);
+            }
+        };
+    }
+
+    /**
      * A hint is advisory. After a hinted open decodes the hinted rows of a page, a later fill on the same context of an
      * unhinted row behind the cursor caches the page whole, and one past the cursor resumes it.
      */
