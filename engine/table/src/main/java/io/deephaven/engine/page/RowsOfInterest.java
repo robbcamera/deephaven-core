@@ -18,6 +18,9 @@ import java.util.function.Supplier;
  * context to. A paging source may decode them all on its first read of a page, rather than only the rows requested, or
  * cache the page whole if they are most of it. The hint is advisory: a superset is safe, and a row outside it is read
  * as usual.
+ * <p>
+ * The row keys are those of the sources the context is passed to. A source that reads its inner sources at other row
+ * keys, as a redirection does, must give them a context of their own.
  */
 public final class RowsOfInterest implements ResettableContext {
 
@@ -100,6 +103,25 @@ public final class RowsOfInterest implements ResettableContext {
     @Nullable
     public RowSet rows() {
         return rows == null ? null : rows.get();
+    }
+
+    /**
+     * @return An estimate of how many row keys of interest lie in {@code [firstKey, lastKey]}, made without computing
+     *         them, or {@code -1} if there is none: the hint is not {@link Estimated}
+     */
+    public double estimateRowsIn(final long firstKey, final long lastKey) {
+        return rows instanceof Estimated ? ((Estimated) rows).estimateRowsIn(firstKey, lastKey) : -1;
+    }
+
+    /**
+     * Supplies rows of interest that are costly to compute, and estimates them cheaply, so that a source which would
+     * read a page whole anyway need not compute them.
+     */
+    public interface Estimated extends Supplier<RowSet> {
+        /**
+         * @return An estimate of how many of the rows {@link #get()} supplies lie in {@code [firstKey, lastKey]}
+         */
+        double estimateRowsIn(long firstKey, long lastKey);
     }
 
     @Override

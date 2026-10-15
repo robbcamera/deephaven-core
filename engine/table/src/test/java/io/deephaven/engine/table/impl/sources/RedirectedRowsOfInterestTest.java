@@ -3,6 +3,7 @@
 //
 package io.deephaven.engine.table.impl.sources;
 
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.RowSet;
 import io.deephaven.engine.rowset.RowSetBuilderRandom;
 import io.deephaven.engine.rowset.RowSetFactory;
@@ -50,6 +51,29 @@ public class RedirectedRowsOfInterestTest {
             assertEquals(expectedRows, hint.get());
         }
         assertSame("computed once", hint.get(), hint.get());
+    }
+
+    /**
+     * Before the rows are computed, a range's estimate is its share of the right rows scaled by the left table's size;
+     * after, it is exact.
+     */
+    @Test
+    public void testEstimateRowsIn() {
+        final Table left = TableTools.emptyTable(10);
+        final Table right = TableTools.emptyTable(100).where("ii % 2 == 0");
+        final WritableRowRedirection redirection = WritableRowRedirection.FACTORY.createRowRedirection(10);
+        for (long key = 0; key < left.size(); ++key) {
+            redirection.put(key, 2 * key);
+        }
+        final RowsOfInterest.Estimated hint =
+                (RowsOfInterest.Estimated) RedirectedRowsOfInterest.of(left, right, redirection);
+        // 10 left rows over 50 right rows; [0, 19] holds 10 right rows, [1, 1] none.
+        assertEquals(2.0, hint.estimateRowsIn(0, 19), 0);
+        assertEquals(0.0, hint.estimateRowsIn(1, 1), 0);
+        assertEquals(10.0, hint.estimateRowsIn(0, 99), 0);
+        hint.get();
+        assertEquals(10.0, hint.estimateRowsIn(0, 19), 0);
+        assertEquals(0.0, hint.estimateRowsIn(20, 99), 0);
     }
 
     /**
