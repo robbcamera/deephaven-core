@@ -12,7 +12,7 @@ import org.jetbrains.annotations.NotNull;
 
 /**
  * Passes {@link RowsOfInterest} to every context it makes for its delegate, for consumers that read a source through
- * contexts of their own making, such as group-by vectors.
+ * contexts of their own making, such as group-by vectors and formula inputs.
  */
 public final class RowsOfInterestColumnSource<T> extends DelegatingColumnSource<T, T> {
 
