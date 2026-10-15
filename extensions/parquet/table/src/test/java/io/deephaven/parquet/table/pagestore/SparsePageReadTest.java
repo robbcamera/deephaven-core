@@ -75,6 +75,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -1239,6 +1240,41 @@ public class SparsePageReadTest {
             assertTrue("unhinted steps should decode some pages more than once", unhinted > pages);
             assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
         }
+    }
+
+    /**
+     * A formula over a static table hints the table's rows to its inputs, so viewport steps through a filtered table in
+     * file order decode each page once, with no snapshot to supply the hint.
+     */
+    @Test
+    public void testFormulaRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final long unhinted = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), 50)[0];
+            final Table expected = denseAll.updateView("D_f = D * 2");
+            final Table formula = filtered.updateView("D_f = D * 2").view("D_f");
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            fillSteps(expected.getColumnSource("D_f"), formula.getColumnSource("D_f"), filtered.getRowSet(), 50);
+            assertTrue("unhinted steps should decode some pages more than once", unhinted > pages);
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * Only formulas read hinted inputs: a passthrough column is the parent's source itself.
+     */
+    @Test
+    public void testPassthroughColumnsAreNotWrapped() {
+        final Table filtered = ParquetTools.readTable(writeTestTable()).where(FILTERS[0]);
+        final ColumnSource<?> source = filtered.getColumnSource("D");
+        assertTrue(RowsOfInterest.readBy(source));
+        assertSame(source, filtered.view("D", "D_f = D * 2").getColumnSource("D"));
+        assertSame(source, filtered.updateView("D_f = D * 2").getColumnSource("D"));
     }
 
     /**
