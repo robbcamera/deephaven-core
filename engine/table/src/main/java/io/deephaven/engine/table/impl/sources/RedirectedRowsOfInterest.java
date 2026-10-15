@@ -21,9 +21,10 @@ import java.util.function.Supplier;
 /**
  * The {@link RowsOfInterest} of a join's redirected right columns: the right rows its redirection maps the left rows
  * to, computed when a source first reads the hint. A join reads only those, which may be far fewer than the right
- * table's rows.
+ * table's rows. Until then, a range's share of them is estimated as its share of the right rows, scaled by the left
+ * table's size: a source that would read the range whole on that estimate need not map every left row.
  */
-public final class RedirectedRowsOfInterest implements Supplier<RowSet> {
+public final class RedirectedRowsOfInterest implements RowsOfInterest.Estimated {
 
     private static final int CHUNK_SIZE = 4096;
 
@@ -47,17 +48,44 @@ public final class RedirectedRowsOfInterest implements Supplier<RowSet> {
         if (leftTable.isRefreshing() || leftTable.size() > rightRows.size()) {
             return () -> rightRows;
         }
-        return new RedirectedRowsOfInterest(leftTable.getRowSet(), rowRedirection);
+        return new RedirectedRowsOfInterest(leftTable.getRowSet(), rightRows, rowRedirection);
     }
 
     @Nullable
     private RowSet leftRows;
+    private final RowSet rightRows;
+    /** The left rows per right row: at most 1, since a larger left table hints the right rows instead. */
+    private final double leftPerRight;
     private final RowRedirection rowRedirection;
     private volatile RowSet rows;
 
-    private RedirectedRowsOfInterest(@NotNull final RowSet leftRows, @NotNull final RowRedirection rowRedirection) {
+    private RedirectedRowsOfInterest(
+            @NotNull final RowSet leftRows,
+            @NotNull final RowSet rightRows,
+            @NotNull final RowRedirection rowRedirection) {
         this.leftRows = leftRows;
+        this.rightRows = rightRows;
+        leftPerRight = rightRows.isEmpty() ? 0 : (double) leftRows.size() / rightRows.size();
         this.rowRedirection = rowRedirection;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Exact once the rows are computed. Before, assumes the left rows map evenly over the right rows, one each: an
+     * overestimate for left rows that repeat a match or match nothing.
+     */
+    @Override
+    public double estimateRowsIn(final long firstKey, final long lastKey) {
+        final RowSet computed = rows;
+        return computed != null ? countIn(computed, firstKey, lastKey)
+                : countIn(rightRows, firstKey, lastKey) * leftPerRight;
+    }
+
+    private static long countIn(@NotNull final RowSet rowSet, final long firstKey, final long lastKey) {
+        final long first = rowSet.find(firstKey);
+        final long last = rowSet.find(lastKey);
+        return (last < 0 ? -last - 1 : last + 1) - (first < 0 ? -first - 1 : first);
     }
 
     @Override
@@ -77,7 +105,8 @@ public final class RedirectedRowsOfInterest implements Supplier<RowSet> {
     }
 
     private static RowSet redirectedRows(@NotNull final RowSet leftRows, @NotNull final RowRedirection rowRedirection) {
-        // Sorted a chunk at a time, so that memory is bounded by the result rather than by leftRows.
+        // Mapped a chunk at a time, so no copy of leftRows' keys is held. Sorting each chunk drops duplicates and joins
+        // runs before they reach the builder's queue.
         final RowSetBuilderRandom builder = RowSetFactory.builderRandom();
         try (final ChunkSource.FillContext fillContext = rowRedirection.makeFillContext(CHUNK_SIZE, null);
                 final WritableLongChunk<RowKeys> chunk = WritableLongChunk.makeWritableChunk(CHUNK_SIZE);
