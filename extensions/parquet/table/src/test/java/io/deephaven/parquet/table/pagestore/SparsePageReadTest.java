@@ -12,16 +12,27 @@ import io.deephaven.engine.rowset.RowSetBuilderSequential;
 import io.deephaven.engine.rowset.RowSetFactory;
 import io.deephaven.engine.table.ChunkSource;
 import io.deephaven.engine.table.ColumnSource;
+import io.deephaven.engine.table.SharedContext;
 import io.deephaven.engine.table.Table;
+import io.deephaven.engine.rowset.RowSequenceFactory;
+import io.deephaven.engine.table.impl.BaseTable;
 import io.deephaven.engine.table.impl.QueryTable;
+import io.deephaven.engine.table.impl.SortOperation;
+import io.deephaven.engine.table.impl.remote.ConstructSnapshot;
+import io.deephaven.engine.table.impl.util.BarrageMessage;
 import io.deephaven.engine.table.impl.chunkboxer.ChunkBoxer;
+import io.deephaven.engine.table.impl.sources.RedirectedColumnSource;
+import io.deephaven.engine.table.impl.sources.ReinterpretUtils;
+import io.deephaven.engine.table.impl.util.RowRedirection;
 import io.deephaven.engine.testutil.junit4.EngineCleanup;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.util.TableTools;
 import io.deephaven.engine.util.file.TrackedFileHandleFactory;
 import io.deephaven.parquet.table.ParquetInstructions;
 import io.deephaven.parquet.table.ParquetTools;
 import io.deephaven.parquet.table.metadata.RowGroupInfo;
 import io.deephaven.util.SafeCloseable;
+import io.deephaven.vector.Vector;
 import org.apache.parquet.column.ParquetProperties.WriterVersion;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
@@ -34,6 +45,7 @@ import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
+import org.jetbrains.annotations.Nullable;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -45,15 +57,25 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BinaryOperator;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static io.deephaven.engine.testutil.TstUtils.assertTableEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -627,16 +649,27 @@ public class SparsePageReadTest {
      */
     private static long[] fillSteps(final ColumnSource<?> expected, final ColumnSource<?> actual, final RowSet rows,
             final int step) {
+        return fillSteps(expected, rows, actual, rows, step);
+    }
+
+    /**
+     * As {@link #fillSteps(ColumnSource, ColumnSource, RowSet, int)}, reading {@code expected} at {@code expectedRows}
+     * and {@code actual} at the rows in the same positions of {@code actualRows}.
+     */
+    private static long[] fillSteps(final ColumnSource<?> expected, final RowSet expectedRows,
+            final ColumnSource<?> actual, final RowSet actualRows, final int step) {
+        assertEquals("rows", expectedRows.size(), actualRows.size());
         final long fillsBefore = ColumnChunkPageStore.sparseFillCount();
         final long hitsBefore = ColumnChunkPageStore.sparseHitCount();
         try (final WritableChunk<Values> expectedChunk = expected.getChunkType().makeWritableChunk(step);
                 final WritableChunk<Values> actualChunk = actual.getChunkType().makeWritableChunk(step);
-                final RowSequence.Iterator it = rows.getRowSequenceIterator()) {
+                final RowSequence.Iterator expectedIt = expectedRows.getRowSequenceIterator();
+                final RowSequence.Iterator it = actualRows.getRowSequenceIterator()) {
             while (it.hasMore()) {
                 final RowSequence stepRows = it.getNextRowSequenceWithLength(step);
                 try (final ChunkSource.FillContext expectedContext = expected.makeFillContext(step);
                         final ChunkSource.FillContext actualContext = actual.makeFillContext(step)) {
-                    expected.fillChunk(expectedContext, expectedChunk, stepRows);
+                    expected.fillChunk(expectedContext, expectedChunk, expectedIt.getNextRowSequenceWithLength(step));
                     actual.fillChunk(actualContext, actualChunk, stepRows);
                 }
                 for (int ii = 0; ii < expectedChunk.size(); ++ii) {
@@ -710,10 +743,30 @@ public class SparsePageReadTest {
     }
 
     /**
-     * @return The union of the readers' rows, which the caller must close
+     * Readers whose contexts carry hints publish every hinted row of each page they open, while other readers read and
+     * publish to the same pages. Even readers hint every reader's rows; odd readers hint only the next reader's, so
+     * they also read rows outside their hint.
      */
+    @Test
+    public void testConcurrentHintedReadersMatchDense() throws Exception {
+        final String path = writeTestTable();
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        final long before = ColumnChunkPageStore.sparseFillCount();
+        assertConcurrentReadersMatchDense(expected, ParquetTools.readTable(path), true).close();
+        assertTrue("the readers should read sparsely", ColumnChunkPageStore.sparseFillCount() > before);
+    }
+
     private static RowSet assertConcurrentReadersMatchDense(final Table expected, final Table actual)
             throws Exception {
+        return assertConcurrentReadersMatchDense(expected, actual, false);
+    }
+
+    /**
+     * @param hinted Whether the readers' contexts carry hints; see {@link #testConcurrentHintedReadersMatchDense()}
+     * @return The union of the readers' rows, which the caller must close
+     */
+    private static RowSet assertConcurrentReadersMatchDense(final Table expected, final Table actual,
+            final boolean hinted) throws Exception {
         final int numThreads = 4;
         final List<RowSet> rows = new ArrayList<>();
         for (int tt = 0; tt < numThreads; ++tt) {
@@ -725,13 +778,14 @@ public class SparsePageReadTest {
             final List<Future<?>> futures = new ArrayList<>();
             for (int tt = 0; tt < numThreads; ++tt) {
                 final RowSet threadRows = rows.get(tt);
+                final RowSet hint = !hinted ? null : tt % 2 == 0 ? allRows : rows.get((tt + 1) % numThreads);
                 futures.add(executor.submit(() -> {
                     for (int rep = 0; rep < 3; ++rep) {
                         for (final String column : expected.getDefinition().getColumnNamesArray()) {
                             assertFillsMatch(column, expected.getColumnSource(column), actual.getColumnSource(column),
-                                    threadRows, false);
+                                    threadRows, false, hint);
                             assertFillsMatch(column, expected.getColumnSource(column), actual.getColumnSource(column),
-                                    allRows, false);
+                                    allRows, false, hint);
                         }
                     }
                 }));
@@ -796,12 +850,535 @@ public class SparsePageReadTest {
         assertTrue("the first chunk should read sparsely", ColumnChunkPageStore.sparseFillCount() > before);
     }
 
+    /**
+     * A sort over a static parent hints its parent's rows, so a viewport scrolling the sort decodes each page once, as
+     * a single pass in file order would, rather than once per step that touches it.
+     */
+    @Test
+    public void testRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
+                final RowSet filteredRows = expected.where(FILTERS[0]).getRowSet().copy()) {
+            final long pages = fillSteps(expected.getColumnSource("L"),
+                    ParquetTools.readTable(path).getColumnSource("L"), filteredRows, filteredRows.intSize())[0];
+            final long[] hinted = scrollSorted(path, expected, FILTERS[0], true);
+            final long[] unhinted = scrollSorted(path, expected, FILTERS[0], false);
+            assertEquals("hinted sparse fills", pages, hinted[0]);
+            assertTrue("unhinted sparse fills", unhinted[0] > pages);
+        }
+    }
+
+    /**
+     * A natural join over a static right table hints the right table's rows, so a viewport scrolling the join in an
+     * order scattered over the right table decodes each right page once.
+     */
+    @Test
+    public void testJoinRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final String rightFilter = FILTERS[0] + " && !IsNull";
+        final String hash = "H_ = (ii * 2654435761L) % 1000003L";
+        final Table expected = dense(() -> ParquetTools.readTable(path).where(rightFilter).updateView(hash)
+                .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).where(rightFilter), "K=L", "D")
+                .select());
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table right = ParquetTools.readTable(path).where(rightFilter);
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
+            final Table joined = ParquetTools.readTable(path).where(rightFilter).updateView(hash).sort("H_")
+                    .view("K = L").naturalJoin(right, "K=L", "D");
+            final long[] reads = fillSteps(expected.getColumnSource("D"), joined.getColumnSource("D"),
+                    joined.getRowSet(), 50);
+            assertEquals("sparse fills", pages, reads[0]);
+        }
+    }
+
+    /**
+     * A natural join of static tables hints the right rows it matched, not the right table's rows: an unfiltered right
+     * table would hint every row, which is dense enough to cache every page whole. A viewport scrolling the join
+     * decodes each matched right page once instead.
+     */
+    @Test
+    public void testJoinHintsMatchedRows() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
+        final String leftFilter = "ii % 97 == 0 && !IsNull";
+        final String hash = "H_ = (ii * 2654435761L) % 1000003L";
+        final Table expected = dense(() -> ParquetTools.readTable(path).where(leftFilter).updateView(hash)
+                .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).updateView("RK = ii"), "K=RK", "D")
+                .select());
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
+                final RowSet matched = denseAll.where(leftFilter).getRowSet().copy()) {
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), matched, matched.intSize())[0];
+            final Table joined = ParquetTools.readTable(path).where(leftFilter).updateView(hash).sort("H_")
+                    .view("K = L").naturalJoin(ParquetTools.readTable(path).updateView("RK = ii"), "K=RK", "D");
+            final long[] reads = fillSteps(expected.getColumnSource("D"), joined.getColumnSource("D"),
+                    joined.getRowSet(), 50);
+            assertTrue("should read sparsely", pages > 0);
+            assertEquals("sparse fills", pages, reads[0]);
+        }
+    }
+
+    /**
+     * A first-by or last-by of a static table hints the table's rows, so a viewport scrolling the result in an order
+     * scattered over the table caches each page whole on its first read, rather than opening it sparsely again and
+     * again.
+     */
+    @Test
+    public void testFirstAndLastByCachePagesWhole() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
+        final String group = "G = ii - ii % 97";
+        final String hash = "H_ = (G * 2654435761L) % 1000003L";
+        for (final boolean first : new boolean[] {true, false}) {
+            final Function<Table, Table> agg = table -> {
+                final Table grouped = table.updateView(group);
+                return (first ? grouped.firstBy("G") : grouped.lastBy("G")).updateView(hash).sort("H_");
+            };
+            final Table expected = dense(() -> agg.apply(ParquetTools.readTable(path)).select());
+            try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+                final long opensBefore = ColumnChunkPageStore.sparseOpenCount();
+                final Table actual = agg.apply(ParquetTools.readTable(path));
+                final long[] reads = fillSteps(expected.getColumnSource("D"), actual.getColumnSource("D"),
+                        actual.getRowSet(), 50);
+                final String label = first ? "first" : "last";
+                assertEquals(label + " sparse opens", 0, ColumnChunkPageStore.sparseOpenCount() - opensBefore);
+                assertEquals(label + " sparse fills", 0, reads[0]);
+            }
+        }
+    }
+
+    /**
+     * An as-of join over a static right table hints the right rows it matched, so a viewport scrolling the join in an
+     * order scattered over the right table decodes each right page once.
+     */
+    @Test
+    public void testAsOfJoinRowsOfInterestDecodeEachPageOnce() {
+        assertJoinDecodesEachPageOnce((left, right) -> left.aj(right, "K>=L", "D"));
+    }
+
+    /**
+     * A cross join over a static right table hints the right table's rows, so a viewport scrolling the join in an order
+     * scattered over the right table decodes each right page once.
+     */
+    @Test
+    public void testCrossJoinRowsOfInterestDecodeEachPageOnce() {
+        assertJoinDecodesEachPageOnce((left, right) -> left.join(right, "K=L", "D"));
+    }
+
+    /**
+     * Join a left table, ordered by a hash and with one row per right row, to the right table's {@code D}, and assert
+     * that scrolling the result decodes each right page once.
+     */
+    private void assertJoinDecodesEachPageOnce(final BinaryOperator<Table> join) {
+        final String path = writeTestTable();
+        final String rightFilter = FILTERS[0] + " && !IsNull";
+        final String hash = "H_ = (ii * 2654435761L) % 1000003L";
+        final Table expected = dense(() -> join.apply(
+                ParquetTools.readTable(path).where(rightFilter).updateView(hash).sort("H_").view("K = L"),
+                ParquetTools.readTable(path).where(rightFilter)).select());
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table right = ParquetTools.readTable(path).where(rightFilter);
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
+            final Table joined = join.apply(
+                    ParquetTools.readTable(path).where(rightFilter).updateView(hash).sort("H_").view("K = L"), right);
+            final long[] reads = fillSteps(expected.getColumnSource("D"), expected.getRowSet(),
+                    joined.getColumnSource("D"), joined.getRowSet(), 50);
+            assertTrue("should read sparsely", pages > 0);
+            assertEquals("sparse fills", pages, reads[0]);
+        }
+    }
+
+    /**
+     * Only sources that may read a page sparsely read hints, so hints are made only for them: not for columns read
+     * while sparse reads are disabled, repeated columns, or sources outside Parquet.
+     */
+    @Test
+    public void testHintsOnlyForSourcesThatReadThem() {
+        final String path = writeTestTable();
+        final Table table = ParquetTools.readTable(path);
+        assertTrue(RowsOfInterest.readBy(table.getColumnSource("L")));
+        assertTrue(RowsOfInterest.readBy(table.getColumnSource("Sym")));
+        // Through its native source, as a snapshot reads it.
+        assertTrue(RowsOfInterest.readBy(table.getColumnSource("Inst")));
+        assertTrue(RowsOfInterest.readBy(ReinterpretUtils.maybeConvertToPrimitive(table.getColumnSource("Inst"))));
+        assertNotNull(RowsOfInterest.of(table, table.getColumnSource("L")));
+        // Repeated.
+        assertFalse(RowsOfInterest.readBy(table.getColumnSource("Arr")));
+        assertNull(RowsOfInterest.of(table, table.getColumnSource("Arr")));
+        // In memory.
+        final Table selected = dense(() -> ParquetTools.readTable(path).select());
+        assertFalse(RowsOfInterest.readBy(selected.getColumnSource("L")));
+        // Read while sparse reads were disabled; enabling them later does not add hints. Coalescing reads the regions.
+        final Table disabled = dense(() -> ParquetTools.readTable(path).coalesce());
+        assertFalse(RowsOfInterest.readBy(disabled.getColumnSource("L")));
+        assertNull(RowsOfInterest.of(disabled, disabled.getColumnSource("L")));
+    }
+
+    /**
+     * A join whose right table was read while sparse reads were disabled makes no hint, so scrolling it once they are
+     * enabled reads as an unhinted join does, decoding some right pages more than once.
+     */
+    @Test
+    public void testNoJoinHintForSourcesReadWhileSparseReadsDisabled() {
+        final String path = writeTestTable();
+        final String rightFilter = FILTERS[0] + " && !IsNull";
+        final String hash = "H_ = (ii * 2654435761L) % 1000003L";
+        final Table expected = dense(() -> ParquetTools.readTable(path).where(rightFilter).updateView(hash)
+                .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).where(rightFilter), "K=L", "D")
+                .select());
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table right = dense(() -> ParquetTools.readTable(path).where(rightFilter));
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
+            final Table joined = ParquetTools.readTable(path).where(rightFilter).updateView(hash).sort("H_")
+                    .view("K = L").naturalJoin(right, "K=L", "D");
+            final long[] reads = fillSteps(expected.getColumnSource("D"), joined.getColumnSource("D"),
+                    joined.getRowSet(), 50);
+            assertTrue("unhinted sparse fills: " + reads[0] + ", pages: " + pages, reads[0] > pages);
+        }
+    }
+
+    /**
+     * A hint supplied lazily, as a join's is, is computed only when a page is opened sparsely: not when a context is
+     * made, nor on reads with sparse reads disabled or served from pages cached whole.
+     */
+    @Test
+    public void testLazyHintComputedOnlyOnSparseOpen() {
+        final String path = writeTestTable();
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        final Table sorted = ParquetTools.readTable(path).updateView("H_ = (ii * 2654435761L) % 1000003L").sort("H_");
+        final RowRedirection redirection = SortOperation.getRowRedirection(sorted);
+        final ColumnSource<?> expectedSource =
+                RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource("L"));
+        final AtomicInteger calls = new AtomicInteger();
+        final Supplier<RowSet> hint = () -> {
+            calls.incrementAndGet();
+            return expected.getRowSet();
+        };
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
+                final RowSet rows = sorted.getRowSet().subSetByPositionRange(0, 50)) {
+            final ColumnSource<?> actual = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), hint);
+            try (final ChunkSource.FillContext ignored2 = actual.makeFillContext(50)) {
+                assertEquals("making a context", 0, calls.get());
+            }
+            dense(() -> fillSteps(expectedSource, actual, rows, 50));
+            assertEquals("sparse reads disabled", 0, calls.get());
+            final long[] cached = fillSteps(expectedSource, actual, rows, 50);
+            assertEquals("pages cached whole: sparse fills", 0, cached[0]);
+            assertEquals("pages cached whole", 0, calls.get());
+            final ColumnSource<?> fresh = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), hint);
+            assertTrue("should read sparsely", fillSteps(expectedSource, fresh, rows, 50)[0] > 0);
+            assertEquals("one context, which opened pages sparsely", 1, calls.get());
+        }
+    }
+
+    /**
+     * A lazy hint estimated to cover most of a page caches the page whole without being computed; one estimated sparse
+     * is computed as usual.
+     */
+    @Test
+    public void testDenseEstimateSkipsHint() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        final Table sorted = ParquetTools.readTable(path).updateView("H_ = (ii * 2654435761L) % 1000003L").sort("H_");
+        final RowRedirection redirection = SortOperation.getRowRedirection(sorted);
+        final ColumnSource<?> expectedSource =
+                RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource("L"));
+        final AtomicInteger calls = new AtomicInteger();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
+                final RowSet requested = sorted.getRowSet().subSetByPositionRange(0, 50);
+                final RowSet none = RowSetFactory.empty()) {
+            // Advisory: an empty hint leaves the sparse reads to the requests.
+            final Supplier<RowSet> rows = () -> {
+                calls.incrementAndGet();
+                return none;
+            };
+            final ColumnSource<?> denseHinted = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), estimatedHint(rows, 1));
+            assertEquals("dense estimate: sparse fills", 0, fillSteps(expectedSource, denseHinted, requested, 50)[0]);
+            assertEquals("dense estimate", 0, calls.get());
+            final ColumnSource<?> sparseHinted = RedirectedColumnSource.alwaysRedirect(redirection,
+                    ParquetTools.readTable(path).getColumnSource("L"), estimatedHint(rows, 0));
+            assertTrue("should read sparsely", fillSteps(expectedSource, sparseHinted, requested, 50)[0] > 0);
+            assertEquals("sparse estimate", 1, calls.get());
+        }
+    }
+
+    /**
+     * @return A hint of {@code rows}, estimated to cover {@code density} of any range
+     */
+    private static RowsOfInterest.Estimated estimatedHint(final Supplier<RowSet> rows, final double density) {
+        return new RowsOfInterest.Estimated() {
+            @Override
+            public RowSet get() {
+                return rows.get();
+            }
+
+            @Override
+            public double estimateRowsIn(final long firstKey, final long lastKey) {
+                return density * (lastKey - firstKey + 1);
+            }
+        };
+    }
+
+    /**
+     * A hint is advisory. After a hinted open decodes the hinted rows of a page, a later fill on the same context of an
+     * unhinted row behind the cursor caches the page whole, and one past the cursor resumes it.
+     */
+    @Test
+    public void testReadsOutsideHintMatchDense() {
+        final String path = writeTestTable();
+        final ColumnSource<?> expected = dense(() -> ParquetTools.readTable(path).select()).getColumnSource("L");
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
+                final RowSet hint = RowSetFactory.fromKeys(10, 20, 30);
+                final RowSet hinted = RowSetFactory.fromKeys(10);
+                final RowSet cachedRow = RowSetFactory.fromKeys(20);
+                final RowSet behind = RowSetFactory.fromKeys(15);
+                final RowSet behindAgain = RowSetFactory.fromKeys(16);
+                final RowSet after = RowSetFactory.fromKeys(40)) {
+            final ColumnSource<?> behindSource = ParquetTools.readTable(path).getColumnSource("L");
+            final long[][] behindReads = fillSequence(expected, behindSource, hint, hinted, behind);
+            assertArrayEquals("hinted open", new long[] {1, 1, 0}, behindReads[0]);
+            assertArrayEquals("behind the cursor: cached whole", new long[] {0, 0, 0}, behindReads[1]);
+            assertArrayEquals("served by the whole page", new long[] {0, 0, 0},
+                    fillSequence(expected, behindSource, null, behindAgain)[0]);
+
+            final long[][] afterReads =
+                    fillSequence(expected, ParquetTools.readTable(path).getColumnSource("L"), hint, hinted, cachedRow,
+                            after);
+            assertArrayEquals("hinted open", new long[] {1, 1, 0}, afterReads[0]);
+            assertArrayEquals("hinted row: cached", new long[] {0, 0, 1}, afterReads[1]);
+            assertArrayEquals("past the cursor: resumed", new long[] {1, 0, 0}, afterReads[2]);
+        }
+    }
+
+    /**
+     * A hint that holds only some of the rows read, through a sort's redirection, reads what a dense read does, for
+     * every column.
+     */
+    @Test
+    public void testPartialHintMatchesDense() {
+        final String path = writeTestTable();
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        final Table actual = ParquetTools.readTable(path);
+        final Table sorted = actual.updateView("H_ = (ii * 2654435761L) % 1000003L").sort("H_");
+        final RowRedirection redirection = SortOperation.getRowRedirection(sorted);
+        final long before = ColumnChunkPageStore.sparseFillCount();
+        // Not every row: with every page read sparsely, each step opens most pages.
+        try (final RowSet hint = expected.where("ii % 3 == 0").getRowSet().copy();
+                final RowSet rows = sorted.getRowSet().subSetByPositionRange(0, 2000)) {
+            for (final String column : expected.getDefinition().getColumnNamesArray()) {
+                fillSteps(RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource(column)),
+                        RedirectedColumnSource.maybeRedirect(redirection, actual.getColumnSource(column), hint),
+                        rows, 50);
+            }
+        }
+        assertTrue("should read sparsely", ColumnChunkPageStore.sparseFillCount() > before);
+    }
+
+    /**
+     * Fill {@code steps} in turn on one context of {@code actual}, hinted {@code hint}, checking each against
+     * {@code expected}.
+     *
+     * @return For each step, its sparse fills, opens, and hits
+     */
+    private static long[][] fillSequence(final ColumnSource<?> expected, final ColumnSource<?> actual,
+            @Nullable final RowSet hint, final RowSet... steps) {
+        final long[][] counts = new long[steps.length][];
+        final int capacity = Arrays.stream(steps).mapToInt(RowSet::intSize).max().orElse(1);
+        try (final SharedContext sharedContext = hint == null ? null : hinted(hint);
+                final ChunkSource.FillContext expectedContext = expected.makeFillContext(capacity);
+                final ChunkSource.FillContext actualContext = actual.makeFillContext(capacity, sharedContext);
+                final WritableChunk<Values> expectedChunk = expected.getChunkType().makeWritableChunk(capacity);
+                final WritableChunk<Values> actualChunk = actual.getChunkType().makeWritableChunk(capacity)) {
+            for (int ss = 0; ss < steps.length; ++ss) {
+                final long fills = ColumnChunkPageStore.sparseFillCount();
+                final long opens = ColumnChunkPageStore.sparseOpenCount();
+                final long hits = ColumnChunkPageStore.sparseHitCount();
+                expected.fillChunk(expectedContext, expectedChunk, steps[ss]);
+                actual.fillChunk(actualContext, actualChunk, steps[ss]);
+                counts[ss] = new long[] {ColumnChunkPageStore.sparseFillCount() - fills,
+                        ColumnChunkPageStore.sparseOpenCount() - opens, ColumnChunkPageStore.sparseHitCount() - hits};
+                assertEquals(expectedChunk.size(), actualChunk.size());
+                for (int ii = 0; ii < expectedChunk.size(); ++ii) {
+                    assertEquals("step " + ss, (Object) ChunkBoxer.boxedGet(expectedChunk, ii),
+                            ChunkBoxer.boxedGet(actualChunk, ii));
+                }
+            }
+        }
+        return counts;
+    }
+
+    /**
+     * @return A shared context carrying {@code hint}, which the caller must close
+     */
+    private static SharedContext hinted(final RowSet hint) {
+        final SharedContext sharedContext = SharedContext.makeSharedContext();
+        RowsOfInterest.attach(sharedContext, hint);
+        return sharedContext;
+    }
+
+    /**
+     * A group-by over a static table hints the table's rows to the contexts its vectors make, so reading every group,
+     * each scattered over every page, decodes each page once.
+     */
+    @Test
+    public void testGroupByRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final String group = "G = (ii * 2654435761L) % 97";
+        final Table expected =
+                dense(() -> ParquetTools.readTable(path).where(FILTERS[0]).updateView(group).groupBy("G").select());
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final Table grouped = filtered.updateView(group).groupBy("G");
+            final ColumnSource<?> expectedSource = expected.getColumnSource("D");
+            final ColumnSource<?> actualSource = grouped.getColumnSource("D");
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            try (final RowSet.Iterator it = grouped.getRowSet().iterator()) {
+                while (it.hasNext()) {
+                    final long key = it.nextLong();
+                    final Object expectedValues = ((Vector<?>) expectedSource.get(key)).toArray();
+                    final Object actualValues = ((Vector<?>) actualSource.get(key)).toArray();
+                    assertTrue("group " + key, Objects.deepEquals(expectedValues, actualValues));
+                }
+            }
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * A snapshot of a static table hints the table's rows, so viewport snapshots stepping through a filtered table in
+     * file order decode each page once, rather than again on each page a step continues onto.
+     */
+    @Test
+    public void testSnapshotRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]).view("D");
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final long unhinted = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), 50)[0];
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            for (long first = 0; first < filtered.size(); first += 50) {
+                final long last = Math.min(first + 50, filtered.size()) - 1;
+                try (final RowSequence positions = RowSequenceFactory.forRange(first, last);
+                        final BarrageMessage snapshot = ConstructSnapshot.constructBackplaneSnapshotInPositionSpace(
+                                this, (BaseTable<?>) filtered, null, positions, null)) {
+                    assertEquals("rows", last - first + 1, snapshot.rowsIncluded.size());
+                }
+            }
+            assertTrue("unhinted steps should decode some pages more than once", unhinted > pages);
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * A formula over a static table hints the table's rows to its inputs, so viewport steps through a filtered table in
+     * file order decode each page once, with no snapshot to supply the hint.
+     */
+    @Test
+    public void testFormulaRowsOfInterestDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final long unhinted = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), 50)[0];
+            final Table expected = denseAll.updateView("D_f = D * 2");
+            final Table formula = filtered.updateView("D_f = D * 2").view("D_f");
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            fillSteps(expected.getColumnSource("D_f"), formula.getColumnSource("D_f"), filtered.getRowSet(), 50);
+            assertTrue("unhinted steps should decode some pages more than once", unhinted > pages);
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * Only formulas read hinted inputs: a passthrough column is the parent's source itself.
+     */
+    @Test
+    public void testPassthroughColumnsAreNotWrapped() {
+        final Table filtered = ParquetTools.readTable(writeTestTable()).where(FILTERS[0]);
+        final ColumnSource<?> source = filtered.getColumnSource("D");
+        assertTrue(RowsOfInterest.readBy(source));
+        assertSame(source, filtered.view("D", "D_f = D * 2").getColumnSource("D"));
+        assertSame(source, filtered.updateView("D_f = D * 2").getColumnSource("D"));
+    }
+
+    /**
+     * A hint covering more of a page than the density cutoff caches the page whole on its first read, as a read without
+     * sparse support would, rather than opening it sparsely first.
+     */
+    @Test
+    public void testRowsOfInterestAboveCutoffCachesPagesWhole() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
+        final Table expected = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final long opensBefore = ColumnChunkPageStore.sparseOpenCount();
+            final long[] hinted = scrollSorted(path, expected, "true", true);
+            assertEquals("sparse opens", 0, ColumnChunkPageStore.sparseOpenCount() - opensBefore);
+            assertEquals("sparse fills", 0, hinted[0]);
+            final long[] unhinted = scrollSorted(path, expected, "true", false);
+            assertTrue("unhinted should read sparsely", unhinted[0] > 0);
+        }
+    }
+
+    /**
+     * Scroll column {@code L} of a fresh read of {@code path}, filtered and then sorted by a hash, in steps of 50, with
+     * or without the sort's hint, and check it against {@code expected}.
+     *
+     * @return The sparse fills and hits
+     */
+    private static long[] scrollSorted(final String path, final Table expected, final String filter,
+            final boolean hinted) {
+        final Table sorted = ParquetTools.readTable(path).where(filter)
+                .updateView("H_ = (ii * 2654435761L) % 1000003L").sort("H_");
+        final RowRedirection redirection = SortOperation.getRowRedirection(sorted);
+        final ColumnSource<?> actual = hinted ? sorted.getColumnSource("L")
+                : RedirectedColumnSource.maybeRedirect(redirection,
+                        ParquetTools.readTable(path).getColumnSource("L"));
+        final ColumnSource<?> expectedSource =
+                RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource("L"));
+        return fillSteps(expectedSource, actual, sorted.getRowSet(), 50);
+    }
+
     private static void assertFillsMatch(
             final String column,
             final ColumnSource<?> expected,
             final ColumnSource<?> actual,
             final RowSet rows,
             final boolean reverse) {
+        assertFillsMatch(column, expected, actual, rows, reverse, null);
+    }
+
+    /**
+     * @param hint If not {@code null}, hinted to {@code actual} through its fill context's shared context
+     */
+    private static void assertFillsMatch(
+            final String column,
+            final ColumnSource<?> expected,
+            final ColumnSource<?> actual,
+            final RowSet rows,
+            final boolean reverse,
+            @Nullable final RowSet hint) {
         final int chunkSize = 37;
         final List<RowSet> chunks = new ArrayList<>();
         try (final RowSequence.Iterator it = rows.getRowSequenceIterator()) {
@@ -812,8 +1389,9 @@ public class SparsePageReadTest {
         if (reverse) {
             Collections.reverse(chunks);
         }
-        try (final ChunkSource.FillContext expectedContext = expected.makeFillContext(chunkSize);
-                final ChunkSource.FillContext actualContext = actual.makeFillContext(chunkSize);
+        try (final SharedContext sharedContext = hint == null ? null : hinted(hint);
+                final ChunkSource.FillContext expectedContext = expected.makeFillContext(chunkSize);
+                final ChunkSource.FillContext actualContext = actual.makeFillContext(chunkSize, sharedContext);
                 final WritableChunk<Values> expectedChunk = expected.getChunkType().makeWritableChunk(chunkSize);
                 final WritableChunk<Values> actualChunk = actual.getChunkType().makeWritableChunk(chunkSize)) {
             for (final RowSet chunk : chunks) {

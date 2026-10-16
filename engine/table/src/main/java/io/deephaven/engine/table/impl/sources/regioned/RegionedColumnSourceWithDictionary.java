@@ -86,6 +86,11 @@ class RegionedColumnSourceWithDictionary<DATA_TYPE>
             return RegionedColumnSourceWithDictionary.this.addRegionForUnitTests(region);
         }
 
+        @Override
+        public boolean readsRowsOfInterest() {
+            return RegionedColumnSourceWithDictionary.this.readsRowsOfInterest();
+        }
+
         @NotNull
         @Override
         ColumnRegionLong<DictionaryKeys> getNullRegion() {

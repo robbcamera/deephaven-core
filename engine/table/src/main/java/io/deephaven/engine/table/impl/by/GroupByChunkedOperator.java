@@ -16,6 +16,7 @@ import io.deephaven.engine.table.ModifiedColumnSet;
 import io.deephaven.engine.table.impl.MatchPair;
 import io.deephaven.engine.table.impl.QueryTable;
 import io.deephaven.engine.table.impl.sources.ObjectArraySource;
+import io.deephaven.engine.table.impl.sources.RowsOfInterestColumnSource;
 import io.deephaven.engine.table.impl.sources.aggregate.AggregateColumnSource;
 import io.deephaven.chunk.*;
 import io.deephaven.engine.rowset.chunkattributes.OrderedRowKeys;
@@ -92,8 +93,9 @@ public final class GroupByChunkedOperator implements GroupByOperator {
         resultAggregatedColumns = new LinkedHashMap<>(aggregatedColumnPairs.length);
         final List<String> inputResultNameList = new ArrayList<>(aggregatedColumnPairs.length);
         Arrays.stream(aggregatedColumnPairs).forEach(pair -> {
-            final AggregateColumnSource<?, ?> aggregateColumnSource =
-                    AggregateColumnSource.make(inputTable.getColumnSource(pair.rightColumn()), rowSets);
+            final AggregateColumnSource<?, ?> aggregateColumnSource = AggregateColumnSource.make(
+                    RowsOfInterestColumnSource.maybeWrap(inputTable.getColumnSource(pair.rightColumn()), inputTable),
+                    rowSets);
             inputAggregatedColumns.put(pair.rightColumn(), aggregateColumnSource);
             if (hiddenResults == null || !hiddenResults.contains(pair.output().name())) {
                 resultAggregatedColumns.put(pair.output().name(), aggregateColumnSource);
