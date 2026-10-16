@@ -90,24 +90,11 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     }
 
     /**
-     * As {@link #alwaysRedirect(RowRedirection, ColumnSource)}, with a hint.
+     * As {@link #alwaysRedirect(RowRedirection, ColumnSource)}, with a hint computed when {@code innerSource} first
+     * reads it.
      *
-     * @param rowsOfInterest Every row of {@code innerSource} that {@code rowRedirection} may map to, passed to it as
-     *        {@link RowsOfInterest}, or {@code null}; must not change
-     */
-    public static <T> ColumnSource<T> alwaysRedirect(
-            @NotNull final RowRedirection rowRedirection,
-            @NotNull final ColumnSource<T> innerSource,
-            @Nullable final RowSet rowsOfInterest) {
-        return new RedirectedColumnSource<>(rowRedirection, innerSource, hint(rowsOfInterest));
-    }
-
-    /**
-     * As {@link #alwaysRedirect(RowRedirection, ColumnSource, RowSet)}, with a hint computed when {@code innerSource}
-     * first reads it.
-     *
-     * @param rowsOfInterest Supplies the hint, or {@code null}; see
-     *        {@link RowsOfInterest#attach(SharedContext, Supplier)}
+     * @param rowsOfInterest Supplies every row of {@code innerSource} that {@code rowRedirection} may map to, passed to
+     *        it as {@link RowsOfInterest}, or {@code null}; see {@link RowsOfInterest#attach(SharedContext, Supplier)}
      */
     public static <T> ColumnSource<T> alwaysRedirect(
             @NotNull final RowRedirection rowRedirection,

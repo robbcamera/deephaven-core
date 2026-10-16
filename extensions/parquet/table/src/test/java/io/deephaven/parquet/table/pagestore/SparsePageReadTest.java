@@ -863,7 +863,7 @@ public class SparsePageReadTest {
     public void testRowsOfInterestDecodeEachPageOnce() {
         final String path = writeTestTable();
         final Table expected = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
                 final RowSet filteredRows = expected.where(FILTERS[0]).getRowSet().copy()) {
             final long pages = fillSteps(expected.getColumnSource("L"),
                     ParquetTools.readTable(path).getColumnSource("L"), filteredRows, filteredRows.intSize())[0];
@@ -887,7 +887,7 @@ public class SparsePageReadTest {
                 .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).where(rightFilter), "K=L", "D")
                 .select());
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table right = ParquetTools.readTable(path).where(rightFilter);
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
@@ -914,7 +914,7 @@ public class SparsePageReadTest {
                 .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).updateView("RK = ii"), "K=RK", "D")
                 .select());
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
                 final RowSet matched = denseAll.where(leftFilter).getRowSet().copy()) {
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), matched, matched.intSize())[0];
@@ -944,7 +944,7 @@ public class SparsePageReadTest {
                 return (first ? grouped.firstBy("G") : grouped.lastBy("G")).updateView(hash).sort("H_");
             };
             final Table expected = dense(() -> agg.apply(ParquetTools.readTable(path)).select());
-            try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+            try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
                 final long opensBefore = ColumnChunkPageStore.sparseOpenCount();
                 final Table actual = agg.apply(ParquetTools.readTable(path));
                 final long[] reads = fillSteps(expected.getColumnSource("D"), actual.getColumnSource("D"),
@@ -986,7 +986,7 @@ public class SparsePageReadTest {
                 ParquetTools.readTable(path).where(rightFilter).updateView(hash).sort("H_").view("K = L"),
                 ParquetTools.readTable(path).where(rightFilter)).select());
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table right = ParquetTools.readTable(path).where(rightFilter);
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
@@ -1038,7 +1038,7 @@ public class SparsePageReadTest {
                 .sort("H_").view("K = L").naturalJoin(ParquetTools.readTable(path).where(rightFilter), "K=L", "D")
                 .select());
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table right = dense(() -> ParquetTools.readTable(path).where(rightFilter));
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), right.getRowSet(), right.intSize())[0];
@@ -1067,7 +1067,7 @@ public class SparsePageReadTest {
             calls.incrementAndGet();
             return expected.getRowSet();
         };
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
                 final RowSet rows = sorted.getRowSet().subSetByPositionRange(0, 50)) {
             final ColumnSource<?> actual = RedirectedColumnSource.alwaysRedirect(redirection,
                     ParquetTools.readTable(path).getColumnSource("L"), hint);
@@ -1100,7 +1100,7 @@ public class SparsePageReadTest {
         final ColumnSource<?> expectedSource =
                 RedirectedColumnSource.maybeRedirect(redirection, expected.getColumnSource("L"));
         final AtomicInteger calls = new AtomicInteger();
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
                 final RowSet requested = sorted.getRowSet().subSetByPositionRange(0, 50);
                 final RowSet none = RowSetFactory.empty()) {
             // Advisory: an empty hint leaves the sparse reads to the requests.
@@ -1144,7 +1144,7 @@ public class SparsePageReadTest {
     public void testReadsOutsideHintMatchDense() {
         final String path = writeTestTable();
         final ColumnSource<?> expected = dense(() -> ParquetTools.readTable(path).select()).getColumnSource("L");
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages();
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages();
                 final RowSet hint = RowSetFactory.fromKeys(10, 20, 30);
                 final RowSet hinted = RowSetFactory.fromKeys(10);
                 final RowSet cachedRow = RowSetFactory.fromKeys(20);
@@ -1244,7 +1244,7 @@ public class SparsePageReadTest {
         final Table expected =
                 dense(() -> ParquetTools.readTable(path).where(FILTERS[0]).updateView(group).groupBy("G").select());
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
@@ -1272,7 +1272,7 @@ public class SparsePageReadTest {
     public void testSnapshotRowsOfInterestDecodeEachPageOnce() {
         final String path = writeTestTable();
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]).view("D");
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
@@ -1300,7 +1300,7 @@ public class SparsePageReadTest {
     public void testFormulaRowsOfInterestDecodeEachPageOnce() {
         final String path = writeTestTable();
         final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
             final long pages = fillSteps(denseAll.getColumnSource("D"),
                     ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
@@ -1336,7 +1336,7 @@ public class SparsePageReadTest {
         final String path = writeTestTable();
         ColumnChunkPageStore.setSparseReadMaxDensity(0.05);
         final Table expected = dense(() -> ParquetTools.readTable(path).select());
-        try (final SafeCloseable ignored = PageCache.pinTouchedPages()) {
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
             final long opensBefore = ColumnChunkPageStore.sparseOpenCount();
             final long[] hinted = scrollSorted(path, expected, "true", true);
             assertEquals("sparse opens", 0, ColumnChunkPageStore.sparseOpenCount() - opensBefore);

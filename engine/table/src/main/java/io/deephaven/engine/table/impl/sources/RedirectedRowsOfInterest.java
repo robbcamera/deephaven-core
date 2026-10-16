@@ -19,10 +19,9 @@ import org.jetbrains.annotations.Nullable;
 import java.util.function.Supplier;
 
 /**
- * The {@link RowsOfInterest} of a join's redirected right columns: the right rows its redirection maps the left rows
- * to, computed when a source first reads the hint. A join reads only those, which may be far fewer than the right
- * table's rows. Until then, a range's share of them is estimated as its share of the right rows, scaled by the left
- * table's size: a source that would read the range whole on that estimate need not map every left row.
+ * The {@link RowsOfInterest} of a join's redirected right columns: the right rows its redirection maps left rows to,
+ * computed when a source first reads the hint. Until then, a range's share is estimated as its share of the right rows,
+ * scaled by the left table's size.
  */
 public final class RedirectedRowsOfInterest implements RowsOfInterest.Estimated {
 

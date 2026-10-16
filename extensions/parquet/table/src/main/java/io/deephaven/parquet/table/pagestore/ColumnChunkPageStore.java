@@ -751,8 +751,9 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             }
             // Opening the page reads the hint, which may compute it.
             final RowSet rowsOfInterest = contextWrapper.rowsOfInterest();
-            try (final RowSet hintOnPage = rowsOfInterest == null ? null
-                    : rowsOfInterest.subSetByKeyRange(pageFirstKey, pageFirstKey + pageRowCount - 1)) {
+            // A view, not a subset: the page is usually dense or unhinted, and then its hinted rows are only counted.
+            try (final RowSequence hintOnPage = rowsOfInterest == null ? null
+                    : rowsOfInterest.getRowSequenceByKeyRange(pageFirstKey, pageFirstKey + pageRowCount - 1)) {
                 if (hintOnPage != null && hintOnPage.size() > maxDensity * pageRowCount) {
                     // The consumer may read most of the page; cache it whole, as a read without sparse support would.
                     return false;
@@ -805,7 +806,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
      */
     @Nullable
     private static WritableRowSet hintedRows(
-            @NotNull final RowSet hintOnPage,
+            @NotNull final RowSequence hintOnPage,
             @Nullable final SparsePage<?> cached,
             @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
             final int decodeCount,
