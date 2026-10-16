@@ -10,6 +10,8 @@ import io.deephaven.engine.table.SharedContext;
 import io.deephaven.engine.table.Table;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.function.Supplier;
+
 /**
  * Passes {@link RowsOfInterest} to every context it makes for its delegate, for consumers that read a source through
  * contexts of their own making, such as group-by vectors and formula inputs.
@@ -29,11 +31,11 @@ public final class RowsOfInterestColumnSource<T> extends DelegatingColumnSource<
         return new RowsOfInterestColumnSource<>(source, rowsOfInterest);
     }
 
-    private final RowSet rowsOfInterest;
+    private final Supplier<RowSet> rowsOfInterest;
 
     private RowsOfInterestColumnSource(@NotNull final ColumnSource<T> source, @NotNull final RowSet rowsOfInterest) {
         super(source.getType(), source.getComponentType(), source);
-        this.rowsOfInterest = rowsOfInterest;
+        this.rowsOfInterest = () -> rowsOfInterest;
     }
 
     @Override
