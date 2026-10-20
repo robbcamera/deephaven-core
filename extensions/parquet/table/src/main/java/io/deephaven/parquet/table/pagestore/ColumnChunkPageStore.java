@@ -913,7 +913,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             destination.setSize(destinationOffset + rowCount);
             destination.copyFromArray(values, 0, destinationOffset, rowCount);
         } else {
-            fillMerged(cached, requestRanges, pageFirstKey, values, rowCount, destination);
+            fillMerged(contextWrapper, cached, requestRanges, pageFirstKey, values, rowCount, destination);
         }
         // Published now, rather than kept pending, so that this context's later fills of hinted rows hit the cache.
         publishSparse(pageNum, hinted, hintedValues);
