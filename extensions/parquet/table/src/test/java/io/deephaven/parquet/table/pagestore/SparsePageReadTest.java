@@ -1293,6 +1293,64 @@ public class SparsePageReadTest {
     }
 
     /**
+     * As {@link #testSnapshotRowsOfInterestDecodeEachPageOnce()}, over runs of rows at the default cutoff: a step
+     * within a run, or one ending just past a page's start, looks dense to the fill, but the hint shows the page is
+     * sparse.
+     */
+    @Test
+    public void testSnapshotRunsDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.125);
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where("ii % 5000 < 64").view("D");
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            for (long first = 0; first < filtered.size(); first += 50) {
+                final long last = Math.min(first + 50, filtered.size()) - 1;
+                try (final RowSequence positions = RowSequenceFactory.forRange(first, last);
+                        final BarrageMessage snapshot = ConstructSnapshot.constructBackplaneSnapshotInPositionSpace(
+                                this, (BaseTable<?>) filtered, null, positions, null)) {
+                    assertEquals("rows", last - first + 1, snapshot.rowsIncluded.size());
+                }
+            }
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * The sort's hint reaches the page store through a reverse and a view, so viewport snapshots of the result decode
+     * each page once, and scrolling back over them hits the cache.
+     */
+    @Test
+    public void testReversedViewSnapshotsDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final String hash = "H_ = (ii * 2654435761L) % 1000003L";
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        final Table expected = denseAll.where(FILTERS[0]).updateView(hash).sort("H_").reverse().view("L");
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where(FILTERS[0]);
+            final long pages = fillSteps(denseAll.getColumnSource("L"),
+                    ParquetTools.readTable(path).getColumnSource("L"), filtered.getRowSet(), filtered.intSize())[0];
+            final Table viewed = filtered.updateView(hash).sort("H_").reverse().view("L");
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            for (long first = 0; first < viewed.size(); first += 50) {
+                final long last = Math.min(first + 50, viewed.size()) - 1;
+                try (final RowSequence positions = RowSequenceFactory.forRange(first, last);
+                        final BarrageMessage snapshot = ConstructSnapshot.constructBackplaneSnapshotInPositionSpace(
+                                this, (BaseTable<?>) viewed, null, positions, null)) {
+                    assertEquals("rows", last - first + 1, snapshot.rowsIncluded.size());
+                }
+            }
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+            final long[] rescroll = fillSteps(expected.getColumnSource("L"), expected.getRowSet(),
+                    viewed.getColumnSource("L"), viewed.getRowSet(), 50);
+            assertEquals("rescroll sparse fills", 0, rescroll[0]);
+        }
+    }
+
+    /**
      * A formula over a static table hints the table's rows to its inputs, so viewport steps through a filtered table in
      * file order decode each page once, with no snapshot to supply the hint.
      */
@@ -1311,6 +1369,26 @@ public class SparsePageReadTest {
             final long before = ColumnChunkPageStore.sparseFillCount();
             fillSteps(expected.getColumnSource("D_f"), formula.getColumnSource("D_f"), filtered.getRowSet(), 50);
             assertTrue("unhinted steps should decode some pages more than once", unhinted > pages);
+            assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
+        }
+    }
+
+    /**
+     * As {@link #testFormulaRowsOfInterestDecodeEachPageOnce()}, over runs of rows: a step within a run makes a
+     * contiguous {@code getChunk}, which must be served from the page's sparse values rather than materialize it.
+     */
+    @Test
+    public void testFormulaContiguousStepsDecodeEachPageOnce() {
+        final String path = writeTestTable();
+        final Table denseAll = dense(() -> ParquetTools.readTable(path).select());
+        try (final SafeCloseable ignored = PageCache.pinCreatedPages()) {
+            final Table filtered = ParquetTools.readTable(path).where("ii % 5000 < 64");
+            final long pages = fillSteps(denseAll.getColumnSource("D"),
+                    ParquetTools.readTable(path).getColumnSource("D"), filtered.getRowSet(), filtered.intSize())[0];
+            final Table expected = denseAll.updateView("D_f = D * 2");
+            final Table formula = filtered.updateView("D_f = D * 2").view("D_f");
+            final long before = ColumnChunkPageStore.sparseFillCount();
+            fillSteps(expected.getColumnSource("D_f"), formula.getColumnSource("D_f"), filtered.getRowSet(), 50);
             assertEquals("sparse fills", pages, ColumnChunkPageStore.sparseFillCount() - before);
         }
     }
@@ -1421,8 +1499,7 @@ public class SparsePageReadTest {
             // A fresh read, so that no page is already cached.
             final Table actual = ParquetTools.readTable(path).where(filter);
             assertTableEquals(expected, actual);
-            // A contiguous request may read whole pages: getChunk serves it from the page directly.
-            if (expectSparse && expected.size() > 0 && !expected.getRowSet().isContiguous()) {
+            if (expectSparse && expected.size() > 0) {
                 assertTrue(path + " where " + filter + " should read sparsely",
                         ColumnChunkPageStore.sparseFillCount() > before);
             }

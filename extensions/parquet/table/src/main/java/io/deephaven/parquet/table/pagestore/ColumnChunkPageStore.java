@@ -15,6 +15,7 @@ import io.deephaven.configuration.Configuration;
 import io.deephaven.engine.page.PagingContextHolder;
 import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.RowSequence;
+import io.deephaven.engine.rowset.RowSequenceFactory;
 import io.deephaven.engine.rowset.RowSet;
 import io.deephaven.engine.rowset.RowSetBuilderSequential;
 import io.deephaven.engine.rowset.RowSetFactory;
@@ -540,13 +541,38 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
 
     @Override
     public Chunk<? extends ATTR> getChunk(@NotNull final GetContext context, @NotNull final RowSequence rowSequence) {
-        if (sparseReadMaxDensity <= 0 || sparseSupport == SparseSupport.UNSUPPORTED || rowSequence.isContiguous()) {
-            // A contiguous request is dense, and may be a slice of a cached page.
+        if (sparseReadMaxDensity <= 0 || sparseSupport == SparseSupport.UNSUPPORTED) {
             return PageStore.super.getChunk(context, rowSequence);
+        }
+        if (rowSequence.isEmpty()) {
+            return getChunkType().getEmptyChunk();
+        }
+        if (rowSequence.isContiguous()) {
+            return getChunk(context, rowSequence.firstRowKey(), rowSequence.lastRowKey());
         }
         // The default materializes the first page; fill instead, so that every page may be read sparsely.
         final WritableChunk<ATTR> destination = DefaultGetContext.getWritableChunk(context);
         fillChunk(DefaultGetContext.getFillContext(context), destination, rowSequence);
+        return destination;
+    }
+
+    @Override
+    @NotNull
+    public Chunk<? extends ATTR> getChunk(@NotNull final GetContext context, final long firstKey, final long lastKey) {
+        if (sparseReadMaxDensity <= 0 || sparseSupport == SparseSupport.UNSUPPORTED) {
+            return PageStore.super.getChunk(context, firstKey, lastKey);
+        }
+        final FillContext fillContext = DefaultGetContext.getFillContext(context);
+        final ChunkPage<ATTR> cachedPage = getCachedPage(pageNumContaining(fillContext, firstKey & mask));
+        if (cachedPage != null && lastKey <= cachedPage.maxRow(firstKey)) {
+            return cachedPage.getChunk(context, firstKey, lastKey);
+        }
+        // The default materializes the page even when its cached sparse values cover the range, as they do for a
+        // viewport step within a run of a hinted consumer's rows; fill instead.
+        final WritableChunk<ATTR> destination = DefaultGetContext.getWritableChunk(context);
+        try (final RowSequence rowSequence = RowSequenceFactory.forRange(firstKey, lastKey)) {
+            fillChunk(fillContext, destination, rowSequence);
+        }
         return destination;
     }
 
@@ -630,12 +656,12 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             final boolean isFirstPage,
             final boolean fillContinues,
             final double maxDensity) throws IOException {
-        // A page may be split across fills, so measure density over the part this fill can see: other fills may request
-        // the rows before its first key (on its first page) and after its last key (on its last). A short contiguous
-        // run therefore looks dense and is cached whole.
+        // Other fills may read the rest of a page, so judge density over the part this one can see; a short contiguous
+        // run then looks dense and is cached whole. A hinted fill leaves it to the hint, which names those other reads.
         final long spanFirstKey = isFirstPage ? pageRows.firstRowKey() : pageFirstKey;
         final long spanLastKey = fillContinues ? pageFirstKey + pageRowCount(pageNum) - 1 : pageRows.lastRowKey();
-        final boolean dense = pageRows.size() > maxDensity * (spanLastKey - spanFirstKey + 1);
+        final boolean dense = !contextWrapper.hasRowsOfInterest()
+                && pageRows.size() > maxDensity * (spanLastKey - spanFirstKey + 1);
         if (fillSparse(contextWrapper, channelContext, destination, pageRows, pageNum, pageFirstKey, dense,
                 maxDensity)) {
             return null;
@@ -1165,6 +1191,10 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         @NotNull
         SeekableChannelContext getChannelContext() {
             return channelContext;
+        }
+
+        boolean hasRowsOfInterest() {
+            return hint != null;
         }
 
         /**
