@@ -773,6 +773,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             if (contextWrapper.estimateRowsOfInterest(pageFirstKey, pageFirstKey + pageRowCount - 1) > maxDensity
                     * pageRowCount) {
                 // The consumer may read most of the page; cache it whole, without computing the hint.
+                SPARSE_DECLINES.increment();
                 return false;
             }
             // Opening the page reads the hint, which may compute it.
@@ -782,6 +783,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
                     : rowsOfInterest.getRowSequenceByKeyRange(pageFirstKey, pageFirstKey + pageRowCount - 1)) {
                 if (hintOnPage != null && hintOnPage.size() > maxDensity * pageRowCount) {
                     // The consumer may read most of the page; cache it whole, as a read without sparse support would.
+                    SPARSE_DECLINES.increment();
                     return false;
                 }
                 if (state.misses.incrementAndGet() > sparseMissesBeforeFullCaching) {
@@ -834,7 +836,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
     private static WritableRowSet hintedRows(
             @NotNull final RowSequence hintOnPage,
             @Nullable final SparsePage<?> cached,
-            @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
+            @NotNull final LongChunk<Indices> decodeRanges,
             final int decodeCount,
             final long pageFirstKey,
             final double budget) {
@@ -857,7 +859,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         return hinted;
     }
 
-    private static WritableRowSet rangesToRowSet(@NotNull final LongChunk<OrderedRowKeyRanges> ranges) {
+    private static WritableRowSet rangesToRowSet(@NotNull final LongChunk<Indices> ranges) {
         final RowSetBuilderSequential builder = RowSetFactory.builderSequential();
         for (int ii = 0; ii < ranges.size(); ii += 2) {
             builder.appendRange(ranges.get(ii), ranges.get(ii + 1));
@@ -878,7 +880,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             @NotNull final SparsePageCursor cursor,
             @Nullable final SparsePage<ATTR> cached,
             @NotNull final WritableRowSet hinted,
-            @NotNull final LongChunk<OrderedRowKeyRanges> decodeRanges,
+            @NotNull final LongChunk<Indices> decodeRanges,
             final int decodeCount,
             @NotNull final LongChunk<OrderedRowKeyRanges> requestRanges,
             final long pageFirstKey,
@@ -892,9 +894,12 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
                 final RowSet valuesPositions = RowSetFactory.flat(decodeCount)) {
             final int hintedCount = hinted.intSize();
             // Reuses the chunk decodeRanges views, which is no longer read.
-            final WritableLongChunk<OrderedRowKeyRanges> hintedRanges =
-                    contextWrapper.decodeRanges(2 * hintedCount);
-            hinted.fillRowKeyRangesChunk(hintedRanges);
+            final WritableLongChunk<Indices> hintedRanges = contextWrapper.decodeRanges(2 * hintedCount);
+            hintedRanges.setSize(0);
+            hinted.forAllRowKeyRanges((first, last) -> {
+                hintedRanges.add(first);
+                hintedRanges.add(last);
+            });
             hintedValues = toPage.convertResult(toPage.getSparseResult(cursor, hintedRanges, hintedCount));
             values = Array.newInstance(hintedValues.getClass().getComponentType(), decodeCount);
             copyPositions(hintedValues, requestedPositions, getChunkType().writableChunkWrap(values, 0, decodeCount),
