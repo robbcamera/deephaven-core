@@ -97,6 +97,13 @@ public final class RowsOfInterest implements ResettableContext {
     }
 
     /**
+     * @return Whether row keys of interest are attached, without computing them
+     */
+    public boolean isAttached() {
+        return rows != null;
+    }
+
+    /**
      * @return The row keys of interest, or {@code null} if none are attached yet; may compute them, so call only to use
      *         them
      */
