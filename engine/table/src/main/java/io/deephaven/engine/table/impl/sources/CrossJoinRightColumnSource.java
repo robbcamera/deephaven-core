@@ -10,6 +10,7 @@ import io.deephaven.chunk.attributes.ChunkPositions;
 import io.deephaven.chunk.attributes.Values;
 
 import io.deephaven.base.verify.Assert;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.table.ColumnSource;
 import io.deephaven.engine.table.impl.AbstractColumnSource;
 import io.deephaven.engine.table.impl.CrossJoinStateManager;
@@ -32,6 +33,7 @@ import io.deephaven.engine.table.impl.util.ChunkUtils;
 import io.deephaven.util.mutable.MutableInt;
 import io.deephaven.util.mutable.MutableLong;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import static io.deephaven.util.QueryConstants.*;
 
@@ -48,26 +50,51 @@ public class CrossJoinRightColumnSource<T> extends AbstractColumnSource<T> imple
             @NotNull final CrossJoinStateManager crossJoinManager,
             @NotNull final ColumnSource<T> innerSource,
             boolean rightIsLive) {
+        return maybeWrap(crossJoinManager, innerSource, rightIsLive, null);
+    }
+
+    /**
+     * As {@link #maybeWrap(CrossJoinStateManager, ColumnSource, boolean)}, with a hint.
+     *
+     * @param rowsOfInterest Every row of {@code innerSource} the join may read, passed to it as {@link RowsOfInterest},
+     *        or {@code null}; must not change
+     */
+    public static <T> ColumnSource<T> maybeWrap(
+            @NotNull final CrossJoinStateManager crossJoinManager,
+            @NotNull final ColumnSource<T> innerSource,
+            boolean rightIsLive,
+            @Nullable final RowSet rowsOfInterest) {
         // Force wrapping if this is a leftOuterJoin or else we will not see the nulls; unless every row is null.
         if ((!crossJoinManager.leftOuterJoin() && innerSource instanceof RowKeyAgnosticChunkSource)
                 || innerSource instanceof NullValueColumnSource) {
             return innerSource;
         }
-        return new CrossJoinRightColumnSource<>(crossJoinManager, innerSource, rightIsLive);
+        return new CrossJoinRightColumnSource<>(crossJoinManager, innerSource, rightIsLive, rowsOfInterest);
     }
 
     private final boolean rightIsLive;
     private final CrossJoinStateManager crossJoinManager;
     protected final ColumnSource<T> innerSource;
+    @Nullable
+    private final RowSet rowsOfInterest;
 
     protected CrossJoinRightColumnSource(
             @NotNull final CrossJoinStateManager crossJoinManager,
             @NotNull final ColumnSource<T> innerSource,
             boolean rightIsLive) {
+        this(crossJoinManager, innerSource, rightIsLive, null);
+    }
+
+    private CrossJoinRightColumnSource(
+            @NotNull final CrossJoinStateManager crossJoinManager,
+            @NotNull final ColumnSource<T> innerSource,
+            boolean rightIsLive,
+            @Nullable final RowSet rowsOfInterest) {
         super(innerSource.getType());
         this.rightIsLive = rightIsLive;
         this.crossJoinManager = crossJoinManager;
         this.innerSource = innerSource;
+        this.rowsOfInterest = rowsOfInterest;
     }
 
     @Override
@@ -351,7 +378,7 @@ public class CrossJoinRightColumnSource<T> extends AbstractColumnSource<T> imple
     protected <ALTERNATE_DATA_TYPE> ColumnSource<ALTERNATE_DATA_TYPE> doReinterpret(
             @NotNull Class<ALTERNATE_DATA_TYPE> alternateDataType) {
         return new CrossJoinRightColumnSource<>(
-                crossJoinManager, innerSource.reinterpret(alternateDataType), rightIsLive);
+                crossJoinManager, innerSource.reinterpret(alternateDataType), rightIsLive, rowsOfInterest);
     }
 
     @Override
@@ -427,6 +454,7 @@ public class CrossJoinRightColumnSource<T> extends AbstractColumnSource<T> imple
                 shareable = sharedContext.getOrCreate(new SharingKey(cs.crossJoinManager),
                         () -> new Shareable(cs.rightIsLive, true, chunkCapacity));
             }
+            RowsOfInterest.attach(shareable, cs.rowsOfInterest);
             innerFillContext = cs.innerSource.makeFillContext(chunkCapacity, shareable);
 
             if (FillUnordered.providesFillUnordered(cs.innerSource)) {
