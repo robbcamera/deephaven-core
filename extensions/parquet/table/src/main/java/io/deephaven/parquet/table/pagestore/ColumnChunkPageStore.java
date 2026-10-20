@@ -1193,8 +1193,12 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
             return channelContext;
         }
 
+        /**
+         * @return Whether the shared context carries a hint; every shared context has a {@link RowsOfInterest}, but
+         *         most consumers attach no rows to it
+         */
         boolean hasRowsOfInterest() {
-            return hint != null;
+            return hint != null && hint.isAttached();
         }
 
         /**

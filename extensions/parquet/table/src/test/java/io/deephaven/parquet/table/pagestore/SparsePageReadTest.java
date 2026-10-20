@@ -1394,6 +1394,40 @@ public class SparsePageReadTest {
     }
 
     /**
+     * A shared context with no rows attached is no hint: a contiguous scan through one, as an aggregation makes, judges
+     * density by each fill and caches every page whole, rather than opening it sparsely first.
+     */
+    @Test
+    public void testSharedContextWithoutRowsCachesContiguousPagesWhole() {
+        final String path = writeTestTable();
+        ColumnChunkPageStore.setSparseReadMaxDensity(0.5);
+        final ColumnSource<?> expected = dense(() -> ParquetTools.readTable(path).select()).getColumnSource("D");
+        final Table table = ParquetTools.readTable(path);
+        final ColumnSource<?> actual = table.getColumnSource("D");
+        final int step = 1024;
+        final long opensBefore = ColumnChunkPageStore.sparseOpenCount();
+        try (final SharedContext sharedContext = SharedContext.makeSharedContext();
+                final ChunkSource.FillContext expectedContext = expected.makeFillContext(step);
+                final ChunkSource.FillContext actualContext = actual.makeFillContext(step, sharedContext);
+                final WritableChunk<Values> expectedChunk = expected.getChunkType().makeWritableChunk(step);
+                final WritableChunk<Values> actualChunk = actual.getChunkType().makeWritableChunk(step);
+                final RowSequence.Iterator it = table.getRowSet().getRowSequenceIterator()) {
+            while (it.hasMore()) {
+                final RowSequence stepRows = it.getNextRowSequenceWithLength(step);
+                sharedContext.reset();
+                expected.fillChunk(expectedContext, expectedChunk, stepRows);
+                actual.fillChunk(actualContext, actualChunk, stepRows);
+                for (int ii = 0; ii < expectedChunk.size(); ++ii) {
+                    final Object expectedValue = ChunkBoxer.boxedGet(expectedChunk, ii);
+                    final Object actualValue = ChunkBoxer.boxedGet(actualChunk, ii);
+                    assertEquals(ii + ": ", expectedValue, actualValue);
+                }
+            }
+        }
+        assertEquals("sparse opens", 0, ColumnChunkPageStore.sparseOpenCount() - opensBefore);
+    }
+
+    /**
      * Only formulas read hinted inputs: a passthrough column is the parent's source itself.
      */
     @Test
