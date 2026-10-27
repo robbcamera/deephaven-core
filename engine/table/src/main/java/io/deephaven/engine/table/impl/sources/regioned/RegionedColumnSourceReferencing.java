@@ -78,6 +78,11 @@ abstract class RegionedColumnSourceReferencing<DATA_TYPE, ATTR extends Values, N
     }
 
     @Override
+    public boolean readsRowsOfInterest() {
+        return nativeSource.readsRowsOfInterest();
+    }
+
+    @Override
     public FillContext makeFillContext(int chunkCapacity, SharedContext sharedContext) {
         return new ColumnRegionReferencingImpl.FillContext<>(nativeSource, this, chunkCapacity, sharedContext);
     }

@@ -49,6 +49,13 @@ public interface PagingChunkSource<ATTR extends Any> extends DefaultChunkSource<
     long mask();
 
     /**
+     * @return Whether this source may read a {@link RowsOfInterest} hint from the shared contexts it is given
+     */
+    default boolean readsRowsOfInterest() {
+        return false;
+    }
+
+    /**
      * <p>
      * The {@code maxRow} is the greatest possible row key which may be referenced in this ChunkSource. This method is
      * used by {@link #fillChunkAppend(FillContext, WritableChunk, RowSequence.Iterator)} to determine which of its row

@@ -8,6 +8,7 @@ import io.deephaven.base.verify.Assert;
 import io.deephaven.chunk.LongChunk;
 import io.deephaven.engine.table.ChunkSource;
 import io.deephaven.chunk.WritableLongChunk;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.*;
 import io.deephaven.engine.rowset.chunkattributes.OrderedRowKeys;
 import io.deephaven.engine.rowset.chunkattributes.RowKeys;
@@ -380,10 +381,13 @@ public class SortOperation implements QueryTable.MemoizableOperation<QueryTable>
     private String populateRedirectedColumns(Map<String, ColumnSource<?>> resultMap, RowRedirection sortMapping) {
         // if nothing is actually redirected, we can use the identity value
         String sortMappingColumnName = IDENTITY_REDIRECTION_VALUE;
+        final RowSet rowsOfInterest = RowsOfInterest.of(parent);
 
         for (Map.Entry<String, ColumnSource<?>> stringColumnSourceEntry : parent.getColumnSourceMap().entrySet()) {
             final ColumnSource<?> innerSource = stringColumnSourceEntry.getValue();
-            final ColumnSource<?> redirectedSource = RedirectedColumnSource.maybeRedirect(sortMapping, innerSource);
+            final ColumnSource<?> redirectedSource =
+                    RedirectedColumnSource.maybeRedirect(sortMapping, innerSource,
+                            RowsOfInterest.readBy(innerSource) ? rowsOfInterest : null);
             resultMap.put(stringColumnSourceEntry.getKey(), redirectedSource);
             if (redirectedSource != innerSource) {
                 sortMappingColumnName = stringColumnSourceEntry.getKey();

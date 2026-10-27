@@ -24,6 +24,7 @@ import io.deephaven.engine.table.impl.select.*;
 import io.deephaven.engine.table.impl.sources.InMemoryColumnSource;
 import io.deephaven.engine.table.impl.sources.PossiblyImmutableColumnSource;
 import io.deephaven.engine.table.impl.sources.RedirectedColumnSource;
+import io.deephaven.engine.table.impl.sources.RowsOfInterestColumnSource;
 import io.deephaven.engine.table.impl.sources.SingleValueColumnSource;
 import io.deephaven.engine.table.impl.sources.WritableRedirectedColumnSource;
 import io.deephaven.engine.table.impl.util.InverseWrappedRowSetRowRedirection;
@@ -186,7 +187,11 @@ public class SelectAndViewAnalyzer implements LogOutputAppendable {
             if (useResultKeySpace) {
                 // the column is evaluated at result row keys, so positional variables such as ii use the result rows
                 sc.initInputs(context.flatResultRowSet, context.allSourcesInResultKeySpace);
+            } else if (sc.maybeGetFormulaColumn().isPresent()) {
+                // Formulas make contexts for their inputs themselves, so hint them through the sources.
+                sc.initInputs(rowSet, context.allSourcesHinted);
             } else {
+                // A passthrough column must publish the parent's source itself.
                 sc.initInputs(rowSet, context.allSources);
             }
 
@@ -435,6 +440,11 @@ public class SelectAndViewAnalyzer implements LogOutputAppendable {
         private final Map<String, ColumnSource<?>> allSources = new LinkedHashMap<>();
         /** The sources that are available to the analyzer, including parent columns, in result key space. */
         private final Map<String, ColumnSource<?>> allSourcesInResultKeySpace;
+        /**
+         * As {@link #allSources}, with parent columns that read {@link io.deephaven.engine.page.RowsOfInterest} hinted
+         * the parent's rows; {@link #allSources} itself if none are.
+         */
+        private final Map<String, ColumnSource<?>> allSourcesHinted;
         /** The sources that are published to the child table. */
         private final Map<String, ColumnSource<?>> publishedSources = new LinkedHashMap<>();
         /** A mapping from result column name to the layer index that created it. */
@@ -475,6 +485,15 @@ public class SelectAndViewAnalyzer implements LogOutputAppendable {
                 publishedSources.putAll(parentSources);
             }
 
+            final Map<String, ColumnSource<?>> hinted = new LinkedHashMap<>(parentSources.size());
+            boolean anyHinted = false;
+            for (final Map.Entry<String, ColumnSource<?>> entry : parentSources.entrySet()) {
+                final ColumnSource<?> source = RowsOfInterestColumnSource.maybeWrap(entry.getValue(), parentTable);
+                anyHinted |= source != entry.getValue();
+                hinted.put(entry.getKey(), source);
+            }
+            allSourcesHinted = anyHinted ? hinted : allSources;
+
             if (!flatResult) {
                 // result key space is the same as parent key space
                 allSourcesInResultKeySpace = allSources;
@@ -501,6 +520,9 @@ public class SelectAndViewAnalyzer implements LogOutputAppendable {
             }
 
             layer.populateColumnSources(allSources);
+            if (allSourcesHinted != allSources) {
+                layer.populateColumnSources(allSourcesHinted);
+            }
             if (flatResult) {
                 layer.populateColumnSources(allSourcesInResultKeySpace);
             }

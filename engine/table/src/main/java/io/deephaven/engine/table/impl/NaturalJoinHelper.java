@@ -7,6 +7,7 @@ import io.deephaven.api.NaturalJoinType;
 import io.deephaven.engine.exceptions.ExactJoinMissingKeyException;
 import io.deephaven.engine.exceptions.DuplicateRightKeyException;
 import io.deephaven.base.verify.Assert;
+import io.deephaven.engine.page.RowsOfInterest;
 import io.deephaven.engine.rowset.*;
 import io.deephaven.engine.rowset.chunkattributes.OrderedRowKeys;
 import io.deephaven.engine.rowset.chunkattributes.RowKeys;
@@ -29,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static io.deephaven.engine.table.impl.JoinControl.BuildParameters.From.*;
 
@@ -523,10 +525,12 @@ class NaturalJoinHelper {
             @NotNull final RowRedirection rowRedirection,
             final boolean rightRefreshingColumns) {
         final Map<String, ColumnSource<?>> columnSourceMap = new LinkedHashMap<>(leftTable.getColumnSourceMap());
+        final Supplier<RowSet> rowsOfInterest = RedirectedRowsOfInterest.of(leftTable, rightTable, rowRedirection);
         for (MatchPair mp : columnsToAdd) {
+            final ColumnSource<?> rightSource = rightTable.getColumnSource(mp.rightColumn());
             // note that we must always redirect the right-hand side, because unmatched rows will be redirected to null
-            final ColumnSource<?> redirectedColumnSource =
-                    RedirectedColumnSource.alwaysRedirect(rowRedirection, rightTable.getColumnSource(mp.rightColumn()));
+            final ColumnSource<?> redirectedColumnSource = RedirectedColumnSource.alwaysRedirect(rowRedirection,
+                    rightSource, RowsOfInterest.readBy(rightSource) ? rowsOfInterest : null);
             if (rightRefreshingColumns) {
                 redirectedColumnSource.startTrackingPrevValues();
             }

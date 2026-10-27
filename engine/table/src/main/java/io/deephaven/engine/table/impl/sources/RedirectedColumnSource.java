@@ -4,6 +4,8 @@
 package io.deephaven.engine.table.impl.sources;
 
 import io.deephaven.base.verify.Assert;
+import io.deephaven.engine.page.RowsOfInterest;
+import io.deephaven.engine.rowset.RowSet;
 import io.deephaven.engine.table.ChunkSource;
 import io.deephaven.engine.table.SharedContext;
 import io.deephaven.engine.table.ColumnSource;
@@ -22,12 +24,14 @@ import io.deephaven.engine.rowset.RowSequenceFactory;
 import io.deephaven.util.SafeCloseable;
 import io.deephaven.util.type.TypeUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import io.deephaven.engine.rowset.chunkattributes.RowKeys;
 
 import io.deephaven.chunk.attributes.Values;
 
 import java.time.Instant;
+import java.util.function.Supplier;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -52,10 +56,23 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     public static <T> ColumnSource<T> maybeRedirect(
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource) {
+        return maybeRedirect(rowRedirection, innerSource, null);
+    }
+
+    /**
+     * As {@link #maybeRedirect(RowRedirection, ColumnSource)}, with a hint.
+     *
+     * @param rowsOfInterest Every row of {@code innerSource} that {@code rowRedirection} may map to, passed to it as
+     *        {@link RowsOfInterest}, or {@code null}; must not change
+     */
+    public static <T> ColumnSource<T> maybeRedirect(
+            @NotNull final RowRedirection rowRedirection,
+            @NotNull final ColumnSource<T> innerSource,
+            @Nullable final RowSet rowsOfInterest) {
         if (innerSource instanceof RowKeyAgnosticChunkSource) {
             return innerSource;
         }
-        return new RedirectedColumnSource<>(rowRedirection, innerSource);
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, hint(rowsOfInterest));
     }
 
     /**
@@ -69,20 +86,49 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     public static <T> ColumnSource<T> alwaysRedirect(
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource) {
-        return new RedirectedColumnSource<>(rowRedirection, innerSource);
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, null);
+    }
+
+    /**
+     * As {@link #alwaysRedirect(RowRedirection, ColumnSource)}, with a hint computed when {@code innerSource} first
+     * reads it.
+     *
+     * @param rowsOfInterest Supplies every row of {@code innerSource} that {@code rowRedirection} may map to, passed to
+     *        it as {@link RowsOfInterest}, or {@code null}; see {@link RowsOfInterest#attach(SharedContext, Supplier)}
+     */
+    public static <T> ColumnSource<T> alwaysRedirect(
+            @NotNull final RowRedirection rowRedirection,
+            @NotNull final ColumnSource<T> innerSource,
+            @Nullable final Supplier<RowSet> rowsOfInterest) {
+        return new RedirectedColumnSource<>(rowRedirection, innerSource, rowsOfInterest);
+    }
+
+    @Nullable
+    private static Supplier<RowSet> hint(@Nullable final RowSet rowsOfInterest) {
+        return rowsOfInterest == null ? null : () -> rowsOfInterest;
     }
 
     protected final RowRedirection rowRedirection;
     protected final ColumnSource<T> innerSource;
     private final boolean ascendingMapping;
+    @Nullable
+    private final Supplier<RowSet> rowsOfInterest;
 
     protected RedirectedColumnSource(
             @NotNull final RowRedirection rowRedirection,
             @NotNull final ColumnSource<T> innerSource) {
+        this(rowRedirection, innerSource, null);
+    }
+
+    private RedirectedColumnSource(
+            @NotNull final RowRedirection rowRedirection,
+            @NotNull final ColumnSource<T> innerSource,
+            @Nullable final Supplier<RowSet> rowsOfInterest) {
         super(innerSource.getType());
         this.rowRedirection = rowRedirection;
         this.innerSource = innerSource;
         this.ascendingMapping = rowRedirection.ascendingMapping();
+        this.rowsOfInterest = rowsOfInterest;
     }
 
     @Override
@@ -398,31 +444,31 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
     @Override
     public ColumnSource<Long> toEpochNano() {
         return new RedirectedColumnSource<>(this.rowRedirection, ((ConvertibleTimeSource) innerSource)
-                .toEpochNano());
+                .toEpochNano(), rowsOfInterest);
     }
 
     @Override
     public ColumnSource<Instant> toInstant() {
         return new RedirectedColumnSource<>(this.rowRedirection, ((ConvertibleTimeSource) innerSource)
-                .toInstant());
+                .toInstant(), rowsOfInterest);
     }
 
     @Override
     public ColumnSource<ZonedDateTime> toZonedDateTime(ZoneId zone) {
         return new RedirectedColumnSource<>(this.rowRedirection, ((ConvertibleTimeSource) innerSource)
-                .toZonedDateTime(zone));
+                .toZonedDateTime(zone), rowsOfInterest);
     }
 
     @Override
     public ColumnSource<LocalDate> toLocalDate(ZoneId zone) {
         return new RedirectedColumnSource<>(this.rowRedirection, ((ConvertibleTimeSource) innerSource)
-                .toLocalDate(zone));
+                .toLocalDate(zone), rowsOfInterest);
     }
 
     @Override
     public ColumnSource<LocalTime> toLocalTime(ZoneId zone) {
         return new RedirectedColumnSource<>(this.rowRedirection, ((ConvertibleTimeSource) innerSource)
-                .toLocalTime(zone));
+                .toLocalTime(zone), rowsOfInterest);
     }
 
     @SuppressWarnings("unchecked")
@@ -447,7 +493,8 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
             extends RedirectedColumnSource<ALTERNATE_DATA_TYPE> {
         private ReinterpretToOriginal(Class<ALTERNATE_DATA_TYPE> alternateDataType) {
             super(RedirectedColumnSource.this.rowRedirection,
-                    RedirectedColumnSource.this.innerSource.reinterpret(alternateDataType));
+                    RedirectedColumnSource.this.innerSource.reinterpret(alternateDataType),
+                    RedirectedColumnSource.this.rowsOfInterest);
         }
 
         @Override
@@ -548,6 +595,7 @@ public class RedirectedColumnSource<T> extends AbstractColumnSource<T>
             shareable = sharedContext == null ? new Shareable(false, cs, chunkCapacity, ascendingMapping)
                     : sharedContext.getOrCreate(new SharingKey(cs.rowRedirection),
                             () -> new Shareable(true, cs, chunkCapacity, ascendingMapping));
+            RowsOfInterest.attach(shareable, cs.rowsOfInterest);
             innerFillContext = cs.innerSource.makeFillContext(chunkCapacity, shareable);
 
             if (ascendingMapping || FillUnordered.providesFillUnordered(cs.innerSource)) {
