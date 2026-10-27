@@ -767,7 +767,7 @@ public abstract class ColumnChunkPageStore<ATTR extends Any>
         // Until this fill completes, the cursor's position is unknown.
         contextWrapper.sparseStore = null;
         if (!onCursorPage) {
-            final long pageRowCount = pageRowCount(pageNum);
+            final int pageRowCount = pageRowCount(pageNum);
             if (contextWrapper.estimateRowsOfInterest(pageFirstKey, pageFirstKey + pageRowCount - 1) > maxDensity
                     * pageRowCount) {
                 // The consumer may read most of the page; cache it whole, without computing the hint.
