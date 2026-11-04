@@ -855,6 +855,8 @@ public class SparsePageReadTest {
 
     private static void assertSparseMatchesDense(final String path, final boolean expectSparse) {
         for (final String filter : FILTERS) {
+            // Both sides decode PLAIN pages with the same Plain*ValuesReader, so this catches sparse-path bugs, not
+            // decode bugs; TestPlainValuesReaders checks the decode against parquet's readers.
             final Table expected = dense(() -> ParquetTools.readTable(path).where(filter).select());
             final long before = ColumnChunkPageStore.sparseFillCount();
             // A fresh read, so that no page is already cached.

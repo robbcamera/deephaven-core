@@ -30,6 +30,8 @@ public class BigDecimalFromLongMaterializer extends ObjectMaterializerBase<BigDe
     };
 
     private final ValuesReader dataReader;
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainLongValuesReader plainReader;
     private final int scale;
 
     private BigDecimalFromLongMaterializer(ValuesReader dataReader, int numValues, int scale) {
@@ -39,11 +41,24 @@ public class BigDecimalFromLongMaterializer extends ObjectMaterializerBase<BigDe
     private BigDecimalFromLongMaterializer(ValuesReader dataReader, BigDecimal nullValue, int numValues, int scale) {
         super(nullValue, new BigDecimal[numValues]);
         this.dataReader = dataReader;
+        this.plainReader = dataReader instanceof PlainLongValuesReader plain ? plain : null;
         this.scale = scale;
     }
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        if (plainReader != null) {
+            final long[] scratch = plainReader.scratch();
+            for (int ii = startIndex; ii < endIndex;) {
+                final int length = Math.min(endIndex - ii, scratch.length);
+                plainReader.readLongs(scratch, 0, length);
+                for (int jj = 0; jj < length; jj++) {
+                    data[ii + jj] = BigDecimal.valueOf(scratch[jj], scale);
+                }
+                ii += length;
+            }
+            return;
+        }
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = BigDecimal.valueOf(dataReader.readLong(), scale);
         }

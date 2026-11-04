@@ -4,8 +4,12 @@
 package io.deephaven.replicators;
 
 import io.deephaven.replication.ReplicationUtils;
+import org.apache.commons.io.FileUtils;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.util.List;
 
 import static io.deephaven.replication.ReplicatePrimitiveCode.charToByte;
 import static io.deephaven.replication.ReplicatePrimitiveCode.replaceAll;
@@ -43,7 +47,25 @@ public class ReplicatePageMaterializers {
             MATERIALIZER_DIR + "BigDecimalFromBytesMaterializer.java";
     private static final String BIG_INTEGER_MATERIALIZER_PATH = MATERIALIZER_DIR + "BigIntegerMaterializer.java";
 
+    private static final String PLAIN_LONG_VALUES_READER_PATH = MATERIALIZER_DIR + "PlainLongValuesReader.java";
+
     public static void main(String... args) throws IOException {
+        // PlainLong -> PlainInt, PlainFloat, PlainDouble
+        replaceAll(TASK, PLAIN_LONG_VALUES_READER_PATH, null, NO_EXCEPTIONS, new String[][] {
+                {"PlainLongValuesReader", "PlainIntValuesReader"},
+                {"readLong", "readInteger"},
+                {"Long", "Int"},
+                {"long", "int"}
+        });
+        replaceAll(TASK, PLAIN_LONG_VALUES_READER_PATH, null, NO_EXCEPTIONS, new String[][] {
+                {"Long", "Float"},
+                {"long", "float"}
+        });
+        replaceAll(TASK, PLAIN_LONG_VALUES_READER_PATH, null, NO_EXCEPTIONS, new String[][] {
+                {"Long", "Double"},
+                {"long", "double"}
+        });
+
         charToByte(TASK, CHAR_MATERIALIZER_PATH, NO_EXCEPTIONS);
 
         // LongBase -> IntBase
@@ -69,7 +91,8 @@ public class ReplicatePageMaterializers {
                 {"return value", "return value ? 1 : 0"}
         };
         ReplicationUtils.fixupChainedFileHeader(TASK,
-                replaceAll(TASK, INT_MATERIALIZER_PATH, null, new String[] {"IntMaterializerBase"}, pairs),
+                removePlainReader(
+                        replaceAll(TASK, INT_MATERIALIZER_PATH, null, new String[] {"IntMaterializerBase"}, pairs)),
                 LONG_MATERIALIZER_CLASS_NAME);
 
         // LongBase -> ShortBase
@@ -81,6 +104,7 @@ public class ReplicatePageMaterializers {
 
         // Long -> Short
         pairs = new String[][] {
+                {"PlainLongValuesReader", "PlainIntValuesReader"},
                 {"dataReader.readLong", "dataReader.readInteger"},
                 {"long value", "int value"},
                 {"return value", "return (short) value"},
@@ -88,16 +112,17 @@ public class ReplicatePageMaterializers {
                 {"Long", "Short"},
                 {"long", "short"}
         };
-        replaceAll(TASK, LONG_MATERIALIZER_PATH, null, NO_EXCEPTIONS, pairs);
+        convertPlainCopy(replaceAll(TASK, LONG_MATERIALIZER_PATH, null, NO_EXCEPTIONS, pairs), "int", "readIntegers");
 
         // Long -> LongFromInt
         pairs = new String[][] {
                 {"LongMaterializer", "LongFromIntMaterializer"},
+                {"PlainLongValuesReader", "PlainIntValuesReader"},
                 {"readLong", "readInteger"},
                 {"long value", "int value"}
         };
-        replaceAll(TASK, LONG_MATERIALIZER_PATH, LONG_FROM_INT_MATERIALIZER_PATH, null,
-                new String[] {"LongMaterializerBase"}, pairs);
+        convertPlainCopy(replaceAll(TASK, LONG_MATERIALIZER_PATH, LONG_FROM_INT_MATERIALIZER_PATH, null,
+                new String[] {"LongMaterializerBase"}, pairs), "int", "readIntegers");
 
         // Long -> LongFromBoolean
         pairs = new String[][] {
@@ -106,7 +131,7 @@ public class ReplicatePageMaterializers {
                 {"long value", "boolean value"},
                 {"return value", "return value ? 1 : 0"}
         };
-        replaceAll(TASK, LONG_MATERIALIZER_PATH, null, new String[] {"LongMaterializerBase"}, pairs);
+        removePlainReader(replaceAll(TASK, LONG_MATERIALIZER_PATH, null, new String[] {"LongMaterializerBase"}, pairs));
 
         // LongFromUnsignedShort -> LongFromUnsignedByte
         pairs = new String[][] {
@@ -162,7 +187,10 @@ public class ReplicatePageMaterializers {
                 {"Double", "Float"}
         };
         ReplicationUtils.fixupChainedFileHeader(TASK,
-                replaceAll(TASK, DOUBLE_MATERIALIZER_PATH, null, new String[] {"DoubleMaterializerBase"}, pairs),
+                convertPlainCopy(
+                        replaceAll(TASK, DOUBLE_MATERIALIZER_PATH, null, new String[] {"DoubleMaterializerBase"},
+                                pairs),
+                        "float", "readFloats"),
                 LONG_MATERIALIZER_CLASS_NAME);
 
         // Short -> ShortFromBoolean
@@ -173,7 +201,8 @@ public class ReplicatePageMaterializers {
                 {"return \\(short\\) value", "return \\(short\\) (value ? 1 : 0)"}
         };
         ReplicationUtils.fixupChainedFileHeader(TASK,
-                replaceAll(TASK, SHORT_MATERIALIZER_PATH, null, new String[] {"ShortMaterializerBase"}, pairs),
+                removePlainReader(
+                        replaceAll(TASK, SHORT_MATERIALIZER_PATH, null, new String[] {"ShortMaterializerBase"}, pairs)),
                 LONG_MATERIALIZER_CLASS_NAME);
 
         // LocalTimeFromMicros -> LocalTimeFromMillis
@@ -183,6 +212,8 @@ public class ReplicatePageMaterializers {
                 {"Micros", "Millis"},
                 {"MICRO", "MILLI"},
                 {"micros", "millis"},
+                {"PlainLongValuesReader", "PlainIntValuesReader"},
+                {"long\\[", "int["},
                 {"readLong", "readInteger"},
                 {"long value", "int value"}
         };
@@ -224,6 +255,7 @@ public class ReplicatePageMaterializers {
 
         // BigDecimalFromLong -> BigDecimalFromInt
         pairs = new String[][] {
+                {"long\\[", "int["},
                 {"readLong", "readInteger"},
                 {"Long", "Int"}
         };
@@ -238,6 +270,41 @@ public class ReplicatePageMaterializers {
                 BIG_DECIMAL_FROM_BYTES_MATERIALIZER_PATH,
                 BIG_INTEGER_MATERIALIZER_PATH,
                 null, NO_EXCEPTIONS, pairs);
+    }
+
+    /**
+     * Boolean pages are bit-packed, so they never get a PLAIN fixed-width reader; drop the plain path along with its
+     * region markers.
+     */
+    private static String removePlainReader(final String path) throws IOException {
+        final File file = new File(path);
+        final List<String> lines =
+                ReplicationUtils.removeRegion(FileUtils.readLines(file, Charset.defaultCharset()), "plainReader");
+        lines.removeIf(line -> line.trim().matches("// (end)?region plainReader"));
+        FileUtils.writeLines(file, lines);
+        return path;
+    }
+
+    /**
+     * The template copies PLAIN values straight into {@code data}; a materializer that converts them copies runs
+     * through the reader's scratch buffer instead.
+     */
+    private static String convertPlainCopy(final String path, final String scratchType, final String readMethod)
+            throws IOException {
+        final File file = new File(path);
+        final List<String> lines = ReplicationUtils.replaceRegion(
+                FileUtils.readLines(file, Charset.defaultCharset()), "plainCopy", List.of(
+                        "            final " + scratchType + "[] scratch = plainReader.scratch();",
+                        "            for (int ii = startIndex; ii < endIndex;) {",
+                        "                final int length = Math.min(endIndex - ii, scratch.length);",
+                        "                plainReader." + readMethod + "(scratch, 0, length);",
+                        "                for (int jj = 0; jj < length; jj++) {",
+                        "                    data[ii + jj] = convertValue(scratch[jj]);",
+                        "                }",
+                        "                ii += length;",
+                        "            }"));
+        FileUtils.writeLines(file, lines);
+        return path;
     }
 }
 

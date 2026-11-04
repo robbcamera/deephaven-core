@@ -171,6 +171,35 @@ class TestPlainBinaryStringValuesReader {
         assertThat(actual).containsExactlyElementsOf(AWKWARD);
     }
 
+    /** The sparse cursor skips the values of rows it doesn't want, between reads. */
+    @Test
+    void skipAdvancesPastWholeValues() {
+        final PlainBinaryStringValuesReader reader = new PlainBinaryStringValuesReader(pageBuffer(encode(AWKWARD)));
+
+        final String[] actual = new String[AWKWARD.size()];
+        reader.skip(0);
+        reader.readStrings(actual, 0, 1);
+        reader.skip(3);
+        reader.skip(0);
+        reader.readStrings(actual, 4, 6);
+        reader.skip(AWKWARD.size() - 6);
+
+        assertThat(actual).containsExactly(
+                AWKWARD.get(0), null, null, null, AWKWARD.get(4), AWKWARD.get(5), null, null, null);
+        assertThatThrownBy(() -> reader.skip(1)).isInstanceOf(ParquetDecodingException.class);
+    }
+
+    /** A skip that runs past the page must fail like a read, not move the cursor into another page's bytes. */
+    @Test
+    void truncatedPageThrowsOnSkip() {
+        final byte[] encoded = encode(AWKWARD);
+        final ByteBuffer in = pageBuffer(encoded);
+        in.limit(encoded.length - 3);
+
+        final PlainBinaryStringValuesReader reader = new PlainBinaryStringValuesReader(in);
+        assertThatThrownBy(() -> reader.skip(AWKWARD.size())).isInstanceOf(ParquetDecodingException.class);
+    }
+
     /**
      * The real page buffer is oversized and reused, with the values somewhere in the middle. Bytes outside
      * {@code [position, limit)} belong to another page and must never be read.
