@@ -33,6 +33,8 @@ public class InstantNanosFromMicrosMaterializer extends LongMaterializerBase imp
     }
 
     private final ValuesReader dataReader;
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainLongValuesReader plainReader;
 
     private InstantNanosFromMicrosMaterializer(ValuesReader dataReader, int numValues) {
         this(dataReader, 0, numValues);
@@ -41,10 +43,23 @@ public class InstantNanosFromMicrosMaterializer extends LongMaterializerBase imp
     private InstantNanosFromMicrosMaterializer(ValuesReader dataReader, long nullValue, int numValues) {
         super(nullValue, numValues);
         this.dataReader = dataReader;
+        this.plainReader = dataReader instanceof PlainLongValuesReader plain ? plain : null;
     }
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        if (plainReader != null) {
+            final long[] scratch = plainReader.scratch();
+            for (int ii = startIndex; ii < endIndex;) {
+                final int length = Math.min(endIndex - ii, scratch.length);
+                plainReader.readLongs(scratch, 0, length);
+                for (int jj = 0; jj < length; jj++) {
+                    data[ii + jj] = convertValue(scratch[jj]);
+                }
+                ii += length;
+            }
+            return;
+        }
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = convertValue(dataReader.readLong());
         }

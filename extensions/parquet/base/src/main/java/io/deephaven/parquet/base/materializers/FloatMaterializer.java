@@ -28,6 +28,8 @@ public class FloatMaterializer implements PageMaterializer {
     }
 
     private final ValuesReader dataReader;
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainFloatValuesReader plainReader;
 
     private final float nullValue;
     private final float[] data;
@@ -38,6 +40,7 @@ public class FloatMaterializer implements PageMaterializer {
 
     private FloatMaterializer(ValuesReader dataReader, float nullValue, int numValues) {
         this.dataReader = dataReader;
+        this.plainReader = dataReader instanceof PlainFloatValuesReader plain ? plain : null;
         this.nullValue = nullValue;
         this.data = new float[numValues];
     }
@@ -49,6 +52,10 @@ public class FloatMaterializer implements PageMaterializer {
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        if (plainReader != null) {
+            plainReader.readFloats(data, startIndex, endIndex - startIndex);
+            return;
+        }
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = convertValue(dataReader.readFloat());
         }

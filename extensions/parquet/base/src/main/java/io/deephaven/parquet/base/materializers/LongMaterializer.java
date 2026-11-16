@@ -26,6 +26,10 @@ public class LongMaterializer extends LongMaterializerBase implements PageMateri
     }
 
     private final ValuesReader dataReader;
+    // region plainReader
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainLongValuesReader plainReader;
+    // endregion plainReader
 
     private LongMaterializer(ValuesReader dataReader, int numValues) {
         this(dataReader, 0, numValues);
@@ -34,10 +38,21 @@ public class LongMaterializer extends LongMaterializerBase implements PageMateri
     private LongMaterializer(ValuesReader dataReader, long nullValue, int numValues) {
         super(nullValue, numValues);
         this.dataReader = dataReader;
+        // region plainReader
+        this.plainReader = dataReader instanceof PlainLongValuesReader plain ? plain : null;
+        // endregion plainReader
     }
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        // region plainReader
+        if (plainReader != null) {
+            // region plainCopy
+            plainReader.readLongs(data, startIndex, endIndex - startIndex);
+            // endregion plainCopy
+            return;
+        }
+        // endregion plainReader
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = convertValue(dataReader.readLong());
         }

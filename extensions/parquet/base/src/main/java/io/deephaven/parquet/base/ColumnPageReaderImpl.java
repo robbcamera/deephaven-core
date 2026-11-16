@@ -10,6 +10,7 @@ import io.deephaven.base.verify.Require;
 import io.deephaven.chunk.WritableByteChunk;
 import io.deephaven.chunk.sized.SizedByteChunk;
 import io.deephaven.parquet.base.materializers.IntMaterializer;
+import io.deephaven.parquet.base.materializers.PlainValuesReaders;
 import io.deephaven.parquet.base.materializers.StringPageMaterializerFactory;
 import io.deephaven.parquet.compress.CompressorAdapter;
 import io.deephaven.util.SafeCloseable;
@@ -749,6 +750,14 @@ final class ColumnPageReaderImpl implements ColumnPageReader {
                 && in.hasArray()) {
             // `in` is already positioned past the repetition and definition levels.
             return stringFactory.makePlainBinaryValuesReader(in);
+        }
+        // Unlike the String reader, these support the full per-value interface, so any factory can take them.
+        if (dataEncoding == Encoding.PLAIN) {
+            final ValuesReader plainReader =
+                    PlainValuesReaders.make(path.getPrimitiveType().getPrimitiveTypeName(), in);
+            if (plainReader != null) {
+                return plainReader;
+            }
         }
         final ValuesReader dataReader;
         if (dataEncoding.usesDictionary()) {

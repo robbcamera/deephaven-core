@@ -30,6 +30,10 @@ public class IntMaterializer extends IntMaterializerBase implements PageMaterial
     }
 
     private final ValuesReader dataReader;
+    // region plainReader
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainIntValuesReader plainReader;
+    // endregion plainReader
 
     private IntMaterializer(ValuesReader dataReader, int numValues) {
         this(dataReader, 0, numValues);
@@ -38,10 +42,21 @@ public class IntMaterializer extends IntMaterializerBase implements PageMaterial
     private IntMaterializer(ValuesReader dataReader, int nullValue, int numValues) {
         super(nullValue, numValues);
         this.dataReader = dataReader;
+        // region plainReader
+        this.plainReader = dataReader instanceof PlainIntValuesReader plain ? plain : null;
+        // endregion plainReader
     }
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        // region plainReader
+        if (plainReader != null) {
+            // region plainCopy
+            plainReader.readIntegers(data, startIndex, endIndex - startIndex);
+            // endregion plainCopy
+            return;
+        }
+        // endregion plainReader
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = convertValue(dataReader.readInteger());
         }

@@ -30,6 +30,10 @@ public class DoubleMaterializer extends DoubleMaterializerBase implements PageMa
     }
 
     private final ValuesReader dataReader;
+    // region plainReader
+    /** {@link #dataReader} when the page is PLAIN-encoded, else null. */
+    private final PlainDoubleValuesReader plainReader;
+    // endregion plainReader
 
     private DoubleMaterializer(ValuesReader dataReader, int numValues) {
         this(dataReader, 0, numValues);
@@ -38,10 +42,21 @@ public class DoubleMaterializer extends DoubleMaterializerBase implements PageMa
     private DoubleMaterializer(ValuesReader dataReader, double nullValue, int numValues) {
         super(nullValue, numValues);
         this.dataReader = dataReader;
+        // region plainReader
+        this.plainReader = dataReader instanceof PlainDoubleValuesReader plain ? plain : null;
+        // endregion plainReader
     }
 
     @Override
     public void fillValues(int startIndex, int endIndex) {
+        // region plainReader
+        if (plainReader != null) {
+            // region plainCopy
+            plainReader.readDoubles(data, startIndex, endIndex - startIndex);
+            // endregion plainCopy
+            return;
+        }
+        // endregion plainReader
         for (int ii = startIndex; ii < endIndex; ii++) {
             data[ii] = convertValue(dataReader.readDouble());
         }
